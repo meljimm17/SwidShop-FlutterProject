@@ -1,0 +1,125 @@
+rules_version = '2';
+
+// SwidShop Firestore security rules.
+// Production posture: deny by default, allow only what the app needs.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && uid() == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(uid())).data.role == 'admin';
+    }
+
+    // users/{uid}
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+
+      // users/{uid}/private/details — phone, street, ID photos, terms.
+      // Never readable by other users.
+      match /private/{docId} {
+        allow read, create, update: if isOwner(userId) || isAdmin();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // listings/{listingId}
+    match /listings/{listingId} {
+      allow read: if true;
+      allow create: if isSignedIn() &&
+        request.resource.data.sellerId == uid();
+      allow update, delete: if isSignedIn() &&
+        (resource.data.sellerId == uid() || isAdmin());
+    }
+
+    // bids/{bidId}
+    match /bids/{bidId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.resource.data.bidderId == uid();
+      allow update, delete: if isAdmin();
+    }
+
+    // swapOffers/{offerId}
+    match /swapOffers/{offerId} {
+      allow read: if isSignedIn();
+      // sellerId must be the target listing's owner (denormalised so the
+      // seller can query their incoming offers).
+      allow create: if isSignedIn() &&
+        request.resource.data.offeredById == uid() &&
+        request.resource.data.sellerId ==
+          get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.sellerId;
+      // Offerer (withdraw) or the listing's seller (accept / decline).
+      allow update: if isSignedIn() &&
+        (resource.data.offeredById == uid() ||
+         resource.data.sellerId == uid() ||
+         isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // transactions/{transactionId}
+    match /transactions/{transactionId} {
+      allow read: if isSignedIn() &&
+        (resource.data.buyerId == uid() ||
+         resource.data.sellerId == uid() ||
+         isAdmin());
+      allow create: if isSignedIn() &&
+        (request.resource.data.buyerId == uid() ||
+         request.resource.data.sellerId == uid());
+      allow update: if isSignedIn() &&
+        (resource.data.buyerId == uid() ||
+         resource.data.sellerId == uid() ||
+         isAdmin());
+    }
+
+    // chats/{transactionId}/messages
+    match /chats/{transactionId}/messages/{messageId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.resource.data.senderId == uid();
+      allow update, delete: if isAdmin();
+    }
+
+    // ratings/{ratingId}
+    match /ratings/{ratingId} {
+      allow read: if true;
+      allow create: if isSignedIn() &&
+        request.resource.data.raterId == uid();
+      allow update, delete: if isAdmin();
+    }
+
+    // reports/{reportId}
+    match /reports/{reportId} {
+      allow read: if isSignedIn() && isAdmin();
+      allow create: if isSignedIn() &&
+        request.resource.data.reportedBy == uid();
+      allow update, delete: if isAdmin();
+    }
+
+    // categories/{categoryId}
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // notifications/{uid}/items/{itemId}
+    match /notifications/{userId}/items/{itemId} {
+      allow read, update: if isOwner(userId) || isAdmin();
+      allow create: if isSignedIn();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+  }
+}

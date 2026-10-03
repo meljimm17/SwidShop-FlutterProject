@@ -1,0 +1,34 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "swidshop-d8ccf",
+          "appId": "1:480759107326:android:de7f67b10d829539cbdfaf",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "swidshop-d8ccf",
+          "configurations": {
+            "android": "1:480759107326:android:de7f67b10d829539cbdfaf",
+            "web": "1:480759107326:web:8009bf3d313cccb8cbdfaf"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "runtime": "nodejs20",
+      "ignore": ["node_modules", ".git", "firebase-debug.log", "*.local"]
+    }
+  ]
+}

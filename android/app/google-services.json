@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "480759107326",
+    "project_id": "swidshop-d8ccf",
+    "storage_bucket": "swidshop-d8ccf.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:480759107326:android:de7f67b10d829539cbdfaf",
+        "android_client_info": {
+          "package_name": "com.umindanao.swidshop"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "480759107326-nbcsftk9oslbl7f5k7ur98uajmge0cke.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.umindanao.swidshop",
+            "certificate_hash": "f1e64f2db9bd28d6cc394adb5b024bf7398f586b"
+          }
+        },
+        {
+          "client_id": "480759107326-kbaqmd2qqfhdf2115f0q669gidqauc73.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCYV5P9L2pyhWOAbelxr5vwtfEOiHKuFqw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "480759107326-kbaqmd2qqfhdf2115f0q669gidqauc73.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
