@@ -42,11 +42,9 @@ const List<String> kDefaultCategories = [
   'Others',
 ];
 
+/// Shared condition choices ([ListingModel.conditions]) plus Distressed.
 const List<String> kConditions = [
-  'Brand new',
-  'Like new',
-  'Gently used',
-  'Used',
+  ...ListingModel.conditions,
   'Distressed',
 ];
 

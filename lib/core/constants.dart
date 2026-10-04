@@ -16,6 +16,21 @@ class AppConstants {
   static const String firebaseProjectId = 'swidshop-d8ccf';
 
   // ---------------------------------------------------------------------------
+  // Demo admin login (class testing only — the "Continue as Admin" button).
+  //
+  // Anyone with the app can use these, by design: live Firestore rules are
+  // `allow read, write: if true` for class testing, so there is nothing to
+  // protect yet. Before any real release, DELETE this button + account and
+  // provision admins from the console instead.
+  // ---------------------------------------------------------------------------
+
+  /// Demo admin email for one-tap class demos.
+  static const String demoAdminEmail = 'admin@swidshop.demo';
+
+  /// Demo admin password for one-tap class demos.
+  static const String demoAdminPassword = 'swidshop-admin-2026';
+
+  // ---------------------------------------------------------------------------
   // Cloudinary
   // See https://cloudinary.com/documentation/upload_presets
   // ---------------------------------------------------------------------------

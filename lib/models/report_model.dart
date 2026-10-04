@@ -3,7 +3,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 /// What a report is targeting.
 enum ReportTargetType {
   user('user'),
-  listing('listing');
+  listing('listing'),
+
+  /// Phase 4.7: a ratings doc (targetId = ratingId).
+  rating('rating');
 
   const ReportTargetType(this.value);
 

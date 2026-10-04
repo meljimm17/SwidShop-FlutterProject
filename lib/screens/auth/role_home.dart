@@ -52,6 +52,16 @@ Future<void> goAfterAuth(
     if (!context.mounted) return;
   }
   if (!context.mounted) return;
+  final blocked = auth.consumeBlockedReason();
+  if (blocked != null) {
+    await auth.signOut();
+    if (!context.mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => LoginScreen(notice: blocked)),
+      (_) => false,
+    );
+    return;
+  }
   if (auth.profile == null) {
     await auth.signOut();
     if (!context.mounted) return;

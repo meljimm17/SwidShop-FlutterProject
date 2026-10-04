@@ -63,6 +63,9 @@ class UserModel {
     this.completionRate = 0,
     this.trustedBadge = false,
     this.profileComplete = true,
+    this.accountStatus = AccountStatus.active,
+    this.favorites = const [],
+    this.following = const [],
     this.createdAt,
   });
 
@@ -96,6 +99,15 @@ class UserModel {
   /// older docs, which are treated as complete.
   final bool profileComplete;
 
+  /// Listing ids the user hearted (Phase 3.4).
+  final List<String> favorites;
+
+  /// Seller uids the user follows (Phase 3.3).
+  final List<String> following;
+
+  /// Moderation state (Phase 4.2). Missing on older docs → active.
+  final AccountStatus accountStatus;
+
   final DateTime? createdAt;
 
   factory UserModel.fromMap(String uid, Map<String, dynamic> map) {
@@ -116,6 +128,15 @@ class UserModel {
       completionRate: (map['completionRate'] as num?)?.toDouble() ?? 0,
       trustedBadge: map['trustedBadge'] as bool? ?? false,
       profileComplete: map['profileComplete'] as bool? ?? true,
+      accountStatus: AccountStatus.fromValue(map['accountStatus'] as String?),
+      favorites: (map['favorites'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      following: (map['following'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
       createdAt: (map['createdAt'] as Timestamp?)?.toDate(),
     );
   }
@@ -136,6 +157,9 @@ class UserModel {
         'completionRate': completionRate,
         'trustedBadge': trustedBadge,
         'profileComplete': profileComplete,
+        'accountStatus': accountStatus.value,
+        'favorites': favorites,
+        'following': following,
         'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
       };
 
@@ -155,6 +179,9 @@ class UserModel {
     double? completionRate,
     bool? trustedBadge,
     bool? profileComplete,
+    AccountStatus? accountStatus,
+    List<String>? favorites,
+    List<String>? following,
     DateTime? createdAt,
   }) =>
       UserModel(
@@ -174,7 +201,27 @@ class UserModel {
         completionRate: completionRate ?? this.completionRate,
         trustedBadge: trustedBadge ?? this.trustedBadge,
         profileComplete: profileComplete ?? this.profileComplete,
+        accountStatus: accountStatus ?? this.accountStatus,
+        favorites: favorites ?? this.favorites,
+        following: following ?? this.following,
         createdAt: createdAt ?? this.createdAt,
+      );
+}
+
+/// Moderation state of an account. Missing on older docs → active.
+enum AccountStatus {
+  active('active'),
+  suspended('suspended'),
+  banned('banned');
+
+  const AccountStatus(this.value);
+
+  final String value;
+
+  static AccountStatus fromValue(String? value) =>
+      AccountStatus.values.firstWhere(
+        (e) => e.value == value,
+        orElse: () => AccountStatus.active,
       );
 }
 

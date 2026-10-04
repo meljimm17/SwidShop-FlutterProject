@@ -56,6 +56,14 @@ enum ListingStatus {
 
 /// A marketplace listing. Firestore document id is an auto id.
 class ListingModel {
+  /// Condition choices offered by Post Listing — shared by search filters.
+  static const List<String> conditions = [
+    'Brand new',
+    'Like new',
+    'Gently used',
+    'Used',
+  ];
+
   const ListingModel({
     required this.listingId,
     required this.sellerId,

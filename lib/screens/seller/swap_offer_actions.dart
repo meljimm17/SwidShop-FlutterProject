@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
 import '../../models/listing_model.dart';
+import '../../models/notification_model.dart';
 import '../../models/swap_offer_model.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/auth_widgets.dart';
@@ -46,6 +47,20 @@ Future<bool> acceptSwapOfferFlow(
 
   try {
     final txnId = await FirestoreService().acceptSwapOffer(offer);
+    // Notify the buyer (their Activity + chat entry point).
+    try {
+      await FirestoreService().addNotification(
+        offer.offeredById,
+        NotificationModel(
+          type: NotificationType.swapAccepted,
+          message:
+              'Your swap offer for "${mine?.title ?? 'the item'}" was accepted!',
+          relatedId: 'transaction:$txnId',
+        ),
+      );
+    } catch (e) {
+      debugPrint('notifySwapAccepted: $e');
+    }
     if (!context.mounted) return true;
     await showSuccessPopup(
       context,
@@ -75,7 +90,8 @@ Future<bool> acceptSwapOfferFlow(
   }
 }
 
-/// Declines [offer] (status only). Returns true on success.
+/// Declines [offer] (status only) and notifies the offerer.
+/// Returns true on success.
 Future<bool> declineSwapOffer(
   BuildContext context,
   SwapOfferModel offer,
@@ -85,6 +101,18 @@ Future<bool> declineSwapOffer(
       offer.offerId,
       SwapOfferStatus.declined,
     );
+    try {
+      await FirestoreService().addNotification(
+        offer.offeredById,
+        NotificationModel(
+          type: NotificationType.swapOffer,
+          message: 'Your swap offer was declined by the seller.',
+          relatedId: 'offer:${offer.offerId}',
+        ),
+      );
+    } catch (e) {
+      debugPrint('notifySwapDeclined: $e');
+    }
     return true;
   } catch (e) {
     debugPrint('declineSwapOffer: $e');

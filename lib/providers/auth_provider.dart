@@ -27,6 +27,20 @@ class AuthProvider extends ChangeNotifier {
   bool _loading = true;
   bool _isGuest = false;
 
+  /// Set when a suspended/banned profile forces a sign-out (Phase 4.2).
+  /// Interim client-side enforcement — real token revocation needs the
+  /// Cloud Function. Consumed once by the Login screen.
+  String? _blockedReason;
+
+  String? get blockedReason => _blockedReason;
+
+  /// Returns the notice and clears it.
+  String? consumeBlockedReason() {
+    final reason = _blockedReason;
+    _blockedReason = null;
+    return reason;
+  }
+
   User? get firebaseUser => _firebaseUser;
   UserModel? get profile => _profile;
   bool get isLoggedIn => _firebaseUser != null;
@@ -62,6 +76,18 @@ class AuthProvider extends ChangeNotifier {
 
     _profileSub = _firestore.streamUser(user.uid).listen(
       (profile) {
+        if (profile != null &&
+            profile.accountStatus != AccountStatus.active) {
+          _blockedReason = profile.accountStatus == AccountStatus.banned
+              ? 'This account has been banned.'
+              : 'This account is suspended.';
+          _profile = null;
+          _loading = false;
+          notifyListeners();
+          // ignore: unawaited_futures
+          _auth.signOut();
+          return;
+        }
         _profile = profile;
         _loading = false;
         notifyListeners();
@@ -108,6 +134,9 @@ class AuthProvider extends ChangeNotifier {
 
   Future<void> signIn({required String email, required String password}) =>
       _auth.signInWithEmail(email: email, password: password);
+
+  /// One-tap demo admin (provisions on first use).
+  Future<void> signInDemoAdmin() => _auth.signInDemoAdmin();
 
   Future<GoogleSignInResult> signInWithGoogle() => _auth.signInWithGoogle();
 

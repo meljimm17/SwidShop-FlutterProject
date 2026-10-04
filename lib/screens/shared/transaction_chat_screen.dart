@@ -5,11 +5,14 @@ import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/chat_message_model.dart';
 import '../../models/listing_model.dart';
+import '../../models/notification_model.dart';
 import '../../models/transaction_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/type_badge.dart';
+import '../customer/activity_screen.dart';
+import 'rate_sheet.dart';
 
 /// Chat & Status for one transaction: deal header with status controls and
 /// the `chats/{transactionId}/messages` thread.
@@ -34,6 +37,9 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       _firestore.streamMessages(widget.transactionId);
   bool _sending = false;
 
+  /// Guards the one-time rating prompt per completed deal.
+  String? _promptedFor;
+
   @override
   void dispose() {
     _textCtrl.dispose();
@@ -50,6 +56,10 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
         ChatMessageModel(senderId: uid, text: text),
       );
       _textCtrl.clear();
+      // Tell the other party (fire-and-forget): without FCM, this in-app
+      // doc is what lights up their bell and deep-links into this chat.
+      // ignore: unawaited_futures
+      _notifyMessage(uid, text);
     } catch (e) {
       debugPrint('sendMessage: $e');
       if (mounted) {
@@ -62,6 +72,28 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       }
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  /// Notifies the counterparty of a new message (in-app; mirrored as FCM
+  /// in Phase 5). Looks up the deal once — never stored, never cached.
+  Future<void> _notifyMessage(String uid, String text) async {
+    try {
+      final txn = await _firestore.streamTransaction(widget.transactionId).first;
+      final otherId =
+          txn == null ? '' : (txn.sellerId == uid ? txn.buyerId : txn.sellerId);
+      if (otherId.isEmpty) return;
+      final preview = text.length > 80 ? '${text.substring(0, 80)}…' : text;
+      await _firestore.addNotification(
+        otherId,
+        NotificationModel(
+          type: NotificationType.message,
+          message: 'New message: "$preview"',
+          relatedId: 'transaction:${widget.transactionId}',
+        ),
+      );
+    } catch (e) {
+      debugPrint('notifyMessage: $e');
     }
   }
 
@@ -99,6 +131,14 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       stream: _txn,
       builder: (context, snap) {
         final txn = snap.data;
+        if (txn != null &&
+            txn.status == TransactionStatus.completed &&
+            _promptedFor != txn.transactionId) {
+          _promptedFor = txn.transactionId;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _maybePromptRating(txn, uid);
+          });
+        }
         final otherId =
             txn == null ? '' : (txn.sellerId == uid ? txn.buyerId : txn.sellerId);
         return Scaffold(
@@ -156,6 +196,7 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
           body: SafeArea(
             child: Column(
               children: [
+                if (txn != null) _stepper(txn),
                 if (txn != null) _dealHeader(txn, uid),
                 Expanded(child: _thread(uid)),
                 _composer(uid, enabled: txn != null),
@@ -167,10 +208,93 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
     );
   }
 
+  /// Status stepper mirroring `transactions.status`: Order Placed
+  /// (pending) → In Progress (ongoing) → Completed. Terminal states show a
+  /// pill instead. Either party may advance an open deal; reaching
+  /// Completed unlocks rating for both sides.
+  Widget _stepper(TransactionModel txn) {
+    if (txn.status == TransactionStatus.cancelled ||
+        txn.status == TransactionStatus.disputed) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+        child: Row(
+          children: [
+            const Text(
+              'Deal ',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            StatusPill.transaction(txn.status),
+          ],
+        ),
+      );
+    }
+    final stage = switch (txn.status) {
+      TransactionStatus.pending => 0,
+      TransactionStatus.ongoing => 1,
+      TransactionStatus.completed => 2,
+      _ => 0,
+    };
+    const labels = ['Order Placed', 'In Progress', 'Completed'];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 10, 24, 2),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              for (var i = 0; i < labels.length; i++) ...[
+                _dot(i <= stage, i == stage),
+                if (i < labels.length - 1) _bar(i < stage),
+              ],
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              for (var i = 0; i < labels.length; i++)
+                Expanded(
+                  child: Text(
+                    labels[i],
+                    textAlign: i == 0
+                        ? TextAlign.left
+                        : (i == labels.length - 1
+                            ? TextAlign.right
+                            : TextAlign.center),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight:
+                          i == stage ? FontWeight.w700 : FontWeight.w400,
+                      color: i <= stage ? AppColors.ink : AppColors.gray,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dot(bool done, bool current) => Container(
+        width: current ? 14 : 10,
+        height: current ? 14 : 10,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: done ? AppColors.teal : AppColors.line,
+        ),
+      );
+
+  Widget _bar(bool done) => Expanded(
+        child: Container(
+          height: 2,
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          color: done ? AppColors.teal : AppColors.line,
+        ),
+      );
+
   Widget _dealHeader(TransactionModel txn, String uid) {
-    final isSeller = txn.sellerId == uid;
     final open = txn.status == TransactionStatus.pending ||
         txn.status == TransactionStatus.ongoing;
+    final done = txn.status == TransactionStatus.completed;
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       padding: const EdgeInsets.all(12),
@@ -221,7 +345,8 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
             const SizedBox(height: 10),
             Row(
               children: [
-                if (isSeller && txn.status == TransactionStatus.pending)
+                // Either party may advance the deal — buyer or seller.
+                if (txn.status == TransactionStatus.pending)
                   _action(
                     'Start deal',
                     AppColors.teal,
@@ -230,7 +355,7 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
                       'Mark this deal as in progress?',
                     ),
                   ),
-                if (isSeller) ...[
+                if (txn.status == TransactionStatus.ongoing)
                   _action(
                     'Mark completed',
                     AppColors.green,
@@ -240,7 +365,6 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
                           'payment (or swap item) were handed over.',
                     ),
                   ),
-                ],
                 _action(
                   'Cancel',
                   AppColors.red,
@@ -253,8 +377,128 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
               ],
             ),
           ],
+          if (done) ...[
+            const SizedBox(height: 10),
+            _rateButton(txn, uid),
+          ],
         ],
       ),
+    );
+  }
+
+  /// Rating prompt for both sides once the deal completes (3.8/3.10).
+  /// Shows only until this user has rated the counterparty.
+  /// Rating prompt for both sides once the deal completes (3.8/3.10).
+  /// Shows only until this user has rated the counterparty. When this deal
+  /// is already rated, hunts this user's OTHER completed-but-unrated deals
+  /// and points at them instead of nagging about this one.
+  Future<void> _maybePromptRating(TransactionModel txn, String uid) async {
+    final otherId = txn.sellerId == uid ? txn.buyerId : txn.sellerId;
+    if (otherId.isEmpty) return;
+    // Backfill: ratings written before the client-side aggregate existed
+    // never moved the visible average — recompute (idempotent).
+    try {
+      await _firestore.refreshUserRating(otherId);
+    } catch (e) {
+      debugPrint('refreshUserRating: $e');
+    }
+    if (!mounted) return;
+    final rated =
+        await RateSheet.alreadyRated(txn.transactionId, uid);
+    if (!mounted) return;
+    if (!rated) {
+      await showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: AppColors.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => RateSheet(
+          transactionId: txn.transactionId,
+          ratedUserId: otherId,
+          ratedName: '',
+        ),
+      );
+      return;
+    }
+    final othersCount = await _otherUnratedDeals(uid, except: txn.transactionId);
+    if (!mounted || othersCount == 0) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'You have $othersCount other completed deal${othersCount == 1 ? '' : 's'} '
+          'to rate.',
+        ),
+        action: SnackBarAction(
+          label: 'Review',
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const ActivityScreen(
+                initialTab: ActivityTab.purchases,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Count of my other completed deals I haven't rated yet.
+  Future<int> _otherUnratedDeals(String uid, {required String except}) async {
+    try {
+      final mine = await Future.wait([
+        _firestore.streamBuyerTransactions(uid).first,
+        _firestore.streamSellerTransactions(uid).first,
+      ]);
+      var count = 0;
+      for (final t in [...mine[0], ...mine[1]]) {
+        if (t.transactionId == except ||
+            t.status != TransactionStatus.completed) {
+          continue;
+        }
+        if (!await RateSheet.alreadyRated(t.transactionId, uid)) {
+          count++;
+        }
+      }
+      return count;
+    } catch (e) {
+      debugPrint('otherUnratedDeals: $e');
+      return 0;
+    }
+  }
+
+  Widget _rateButton(TransactionModel txn, String uid) {
+    final otherId = txn.sellerId == uid ? txn.buyerId : txn.sellerId;
+    if (otherId.isEmpty) return const SizedBox.shrink();
+    return FutureBuilder<bool>(
+      future: RateSheet.alreadyRated(txn.transactionId, uid),
+      builder: (context, snap) {
+        if (snap.data != false) return const SizedBox.shrink();
+        return SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: () => showModalBottomSheet<void>(
+              context: context,
+              backgroundColor: AppColors.surface,
+              shape: const RoundedRectangleBorder(
+                borderRadius:
+                    BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              builder: (_) => RateSheet(
+                transactionId: txn.transactionId,
+                ratedUserId: otherId,
+                ratedName: '',
+              ),
+            ),
+            icon: const Icon(Icons.star_outline),
+            label: const Text('Rate this deal'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.amber,
+              side: const BorderSide(color: AppColors.amber),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -263,8 +507,7 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
     Color color,
     VoidCallback onTap, {
     bool outlined = false,
-  }) {
-    return Expanded(
+  }) {    return Expanded(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 3),
         child: outlined

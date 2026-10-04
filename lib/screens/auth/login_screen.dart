@@ -33,6 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _obscure = true;
   bool _busy = false;
   bool _googleBusy = false;
+  bool _demoBusy = false;
   String? _emailError;
   String? _passwordError;
 
@@ -196,9 +197,23 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  /// Class-demo shortcut: signs in (or provisions) the shared demo admin,
+  /// then routes by role like any other sign-in.
+  Future<void> _continueAsAdmin() async {
+    setState(() => _demoBusy = true);
+    try {
+      await context.read<AuthProvider>().signInDemoAdmin();
+      if (mounted) await goAfterAuth(context);
+    } catch (e) {
+      if (mounted) _snack(AuthService.messageFor(e));
+    } finally {
+      if (mounted) setState(() => _demoBusy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final anyBusy = _busy || _googleBusy;
+    final anyBusy = _busy || _googleBusy || _demoBusy;
     final canPop = Navigator.of(context).canPop();
 
     return Scaffold(
@@ -337,6 +352,24 @@ class _LoginScreenState extends State<LoginScreen> {
                         foregroundColor: AppColors.gray,
                       ),
                       child: const Text('Browse as guest'),
+                    ),
+                  ),
+                if (!canPop)
+                  Center(
+                    child: TextButton.icon(
+                      onPressed: anyBusy ? null : _continueAsAdmin,
+                      style: TextButton.styleFrom(
+                        foregroundColor: AppColors.teal,
+                      ),
+                      icon: _demoBusy
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.admin_panel_settings_outlined,
+                              size: 18),
+                      label: const Text('Continue as Admin (demo)'),
                     ),
                   ),
               ],

@@ -81,7 +81,12 @@ class _SplashScreenState extends State<SplashScreen>
     _navigated = true;
 
     final Widget next;
-    if (auth.isLoggedIn && auth.profile == null) {
+    final blocked = auth.consumeBlockedReason();
+    if (blocked != null) {
+      await auth.signOut();
+      if (!mounted) return;
+      next = LoginScreen(notice: blocked);
+    } else if (auth.isLoggedIn && auth.profile == null) {
       // Remembered session but no readable profile: don't open Home
       // half-signed-in — sign out and start from Login.
       await auth.signOut();

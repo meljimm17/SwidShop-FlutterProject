@@ -179,6 +179,9 @@ class FirestoreService {
       final current = (data['currentHighestBid'] as num?)?.toDouble() ??
           (data['startingBid'] as num?)?.toDouble() ??
           0;
+      if ((data['sellerId'] as String? ?? '') == bidderId) {
+        throw StateError('You cannot bid on your own listing.');
+      }
       if (amount <= current) {
         throw StateError('Bid must be higher than the current highest bid.');
       }
@@ -274,6 +277,9 @@ class FirestoreService {
     var sellerId = offer.sellerId;
     if (sellerId.isEmpty) {
       sellerId = (await getListing(offer.listingId))?.sellerId ?? '';
+    }
+    if (sellerId.isNotEmpty && sellerId == offer.offeredById) {
+      throw StateError('You cannot swap with your own listing.');
     }
     final data =
         offer.copyWith(offerId: ref.id, sellerId: sellerId).toMap();
@@ -538,4 +544,271 @@ class FirestoreService {
 
   Future<void> markNotificationRead(String uid, String notificationId) =>
       _notificationItems(uid).doc(notificationId).update({'read': true});
+
+  /// Marks every unread item read. Equality-only fetch, batched writes.
+  Future<void> markAllNotificationsRead(String uid) async {
+    final snap =
+        await _notificationItems(uid).where('read', isEqualTo: false).get();
+    if (snap.docs.isEmpty) return;
+    final batch = _db.batch();
+    for (final d in snap.docs) {
+      batch.update(d.reference, {'read': true});
+    }
+    await batch.commit();
+  }
+
+  // ---------------------------------------------------------------------------
+  // buyer-side queries (Phase 3): equality-only, sorted client-side
+  // ---------------------------------------------------------------------------
+
+  /// Users holding the Trusted badge, newest-rating first (client sort).
+  Stream<List<UserModel>> streamTrustedUsers() => _users
+      .where('trustedBadge', isEqualTo: true)
+      .snapshots()
+      .map((snap) {
+    final users =
+        snap.docs.map((d) => UserModel.fromMap(d.id, d.data())).toList();
+    users.sort((a, b) => b.avgRating.compareTo(a.avgRating));
+    return users;
+  });
+
+  /// Bids placed by [uid], newest first (client sort).
+  Stream<List<BidModel>> streamBidsForBidder(String uid) =>
+      _bids.where('bidderId', isEqualTo: uid).snapshots().map((snap) {
+        final bids =
+            snap.docs.map((d) => BidModel.fromMap(d.id, d.data())).toList();
+        bids.sort((a, b) => _compareNullableDates(b.placedAt, a.placedAt));
+        return bids;
+      });
+
+  /// Swap offers made by [uid], newest first (client sort).
+  Stream<List<SwapOfferModel>> streamOffersByUser(String uid) =>
+      _swapOffers.where('offeredById', isEqualTo: uid).snapshots().map((snap) {
+        final offers = snap.docs
+            .map((d) => SwapOfferModel.fromMap(d.id, d.data()))
+            .toList();
+        offers.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return offers;
+      });
+
+  /// Transactions where [uid] is the buyer, newest first (client sort).
+  /// (Deliberately buyer-only: the OR+orderBy variant needs an index.)
+  Stream<List<TransactionModel>> streamBuyerTransactions(String uid) =>
+      _transactions.where('buyerId', isEqualTo: uid).snapshots().map((snap) {
+        final txns = snap.docs
+            .map((d) => TransactionModel.fromMap(d.id, d.data()))
+            .toList();
+        txns.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return txns;
+      });
+
+  /// Ratings left for one transaction (used to show "Rate" exactly once).
+  Future<List<RatingModel>> ratingsForTransaction(String transactionId) async {
+    final snap = await _ratings
+        .where('transactionId', isEqualTo: transactionId)
+        .get();
+    return snap.docs.map((d) => RatingModel.fromMap(d.id, d.data())).toList();
+  }
+
+  /// Recomputes a user's average rating from their `ratings` docs.
+  ///
+  /// Client-side stand-in for the `computeTrustBadge` Cloud Function
+  /// (not deployed): call after `addRating` so profiles reflect new
+  /// reviews immediately.
+  Future<void> refreshUserRating(String uid) async {
+    final snap = await _ratings.where('ratedUserId', isEqualTo: uid).get();
+    var sum = 0.0;
+    for (final d in snap.docs) {
+      sum += ((d.data()['stars'] as num?) ?? 0).toDouble();
+    }
+    final avg =
+        snap.docs.isEmpty ? 0.0 : (sum / snap.docs.length * 10).round() / 10;
+    await _users.doc(uid).update({'avgRating': avg});
+  }
+
+  static int _compareNullableDates(DateTime? a, DateTime? b) {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return a.compareTo(b);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Buy Now (Phase 3.5): no money moves in-app — the chat arranges
+  // payment/delivery afterwards. Marks the listing sold, records the deal,
+  // opens the thread parent doc and notifies the seller.
+  // ---------------------------------------------------------------------------
+
+  /// Completes a fixed-price purchase. Returns the new transaction id.
+  Future<String> buyNowPurchase({
+    required String listingId,
+    required String buyerId,
+  }) async {
+    final listingRef = _listings.doc(listingId);
+    final txnRef = _transactions.doc();
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(listingRef);
+      final data = snap.data();
+      if (data == null) throw StateError('Listing no longer exists.');
+      if (data['status'] != ListingStatus.active.value) {
+        throw StateError('This item is no longer available.');
+      }
+      if (data['type'] != ListingType.buyNow.value) {
+        throw StateError('This item is not a Buy Now listing.');
+      }
+      if ((data['sellerId'] as String? ?? '') == buyerId) {
+        throw StateError('You cannot buy your own listing.');
+      }
+      tx.update(listingRef, {'status': ListingStatus.sold.value});
+      tx.set(txnRef, {
+        'transactionId': txnRef.id,
+        'listingId': listingId,
+        'buyerId': buyerId,
+        'sellerId': data['sellerId'],
+        'type': ListingType.buyNow.value,
+        'amount': data['price'],
+        'listingTitle': data['title'] ?? '',
+        'listingImage': (data['images'] as List?)?.firstOrNull ?? '',
+        'status': TransactionStatus.pending.value,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    });
+
+    final listing = await getListing(listingId);
+    await ensureChatThread(
+      transactionId: txnRef.id,
+      buyerId: buyerId,
+      sellerId: listing?.sellerId ?? '',
+      listingId: listingId,
+    );
+    if (listing != null && listing.sellerId.isNotEmpty) {
+      await addNotification(
+        listing.sellerId,
+        NotificationModel(
+          type: NotificationType.transactionUpdate,
+          message: 'Your item "${listing.title}" just sold.',
+          relatedId: 'transaction:${txnRef.id}',
+        ),
+      );
+    }
+    return txnRef.id;
+  }
+
+  /// Creates the `chats/{transactionId}` parent doc (messages live in its
+  /// `messages` subcollection) so threads are listable later.
+  Future<void> ensureChatThread({
+    required String transactionId,
+    required String buyerId,
+    required String sellerId,
+    required String listingId,
+  }) =>
+      _db.collection(AppConstants.chatsCollection).doc(transactionId).set({
+        'transactionId': transactionId,
+        'buyerId': buyerId,
+        'sellerId': sellerId,
+        'listingId': listingId,
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+  // ---------------------------------------------------------------------------
+  // admin (Phase 4): whole-collection streams, client-side sort/filter.
+  // No where/orderBy combos — nothing here needs a composite index.
+  // ---------------------------------------------------------------------------
+
+  /// Every user doc, newest first (client sort).
+  Stream<List<UserModel>> streamAllUsers() =>
+      _users.snapshots().map((snap) {
+        final users =
+            snap.docs.map((d) => UserModel.fromMap(d.id, d.data())).toList();
+        users.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return users;
+      });
+
+  /// Every listing regardless of status, newest first (client sort).
+  Stream<List<ListingModel>> streamAllListings() =>
+      _listings.snapshots().map((snap) {
+        final items = snap.docs
+            .map((d) => ListingModel.fromMap(d.id, d.data()))
+            .toList();
+        items.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return items;
+      });
+
+  /// Every transaction, newest first (client sort).
+  Stream<List<TransactionModel>> streamAllTransactions() =>
+      _transactions.snapshots().map((snap) {
+        final txns = snap.docs
+            .map((d) => TransactionModel.fromMap(d.id, d.data()))
+            .toList();
+        txns.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return txns;
+      });
+
+  /// Listings in one category (admin counts, reassign on delete).
+  Stream<List<ListingModel>> streamListingsByCategory(String category) =>
+      _listings.where('category', isEqualTo: category).snapshots().map((snap) =>
+          snap.docs.map((d) => ListingModel.fromMap(d.id, d.data())).toList());
+
+  /// Reports with one status, oldest first (pending urgency).
+  Stream<List<ReportModel>> streamReportsByStatus(ReportStatus status) =>
+      _reports.where('status', isEqualTo: status.value).snapshots().map((snap) {
+        final reports = snap.docs
+            .map((d) => ReportModel.fromMap(d.id, d.data()))
+            .toList();
+        reports
+            .sort((a, b) => _compareNullableDates(a.createdAt, b.createdAt));
+        return reports;
+      });
+
+  /// Every report ever filed against one target (prior-strikes context).
+  Future<List<ReportModel>> reportsForTarget(String targetId) async {
+    final snap =
+        await _reports.where('targetId', isEqualTo: targetId).get();
+    return snap.docs.map((d) => ReportModel.fromMap(d.id, d.data())).toList();
+  }
+
+  Future<void> updateReportStatus(
+    String reportId,
+    ReportStatus status,
+  ) =>
+      _reports.doc(reportId).update({'status': status.value});
+
+  Future<void> updateAccountStatus(
+    String uid,
+    AccountStatus status,
+  ) =>
+      _users.doc(uid).update({'accountStatus': status.value});
+
+  Future<void> updateCategory(
+    String categoryId,
+    Map<String, dynamic> data,
+  ) =>
+      _categories.doc(categoryId).update(data);
+
+  Future<void> deleteCategory(String categoryId) =>
+      _categories.doc(categoryId).delete();
+
+  /// Moves every listing in [oldName] to "Uncategorized" (delete guard).
+  Future<int> reassignCategoryListings(String oldName) async {
+    final snap =
+        await _listings.where('category', isEqualTo: oldName).get();
+    if (snap.docs.isEmpty) return 0;
+    final batch = _db.batch();
+    for (final d in snap.docs) {
+      batch.update(d.reference, {'category': 'Uncategorized'});
+    }
+    await batch.commit();
+    return snap.docs.length;
+  }
+
+  Future<RatingModel?> getRating(String ratingId) async {
+    final snap = await _ratings.doc(ratingId).get();
+    final data = snap.data();
+    return data == null ? null : RatingModel.fromMap(snap.id, data);
+  }
+
+  /// Deletes a review; caller refreshes the rated user's average.
+  Future<void> deleteRating(String ratingId) =>
+      _ratings.doc(ratingId).delete();
 }

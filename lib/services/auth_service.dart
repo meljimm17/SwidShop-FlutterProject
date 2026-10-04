@@ -2,6 +2,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
+import '../core/constants.dart';
 import '../models/user_model.dart';
 import 'firestore_service.dart';
 
@@ -81,6 +82,41 @@ class AuthService {
         email: email.trim(),
         password: password,
       );
+
+  /// One-tap demo admin for class testing ("Continue as Admin" button).
+  ///
+  /// Signs in the demo account, provisioning it (Auth user + `admin`-role
+  /// users doc) on first use. Delete with the button before any release.
+  Future<void> signInDemoAdmin() async {
+    try {
+      await _auth.signInWithEmailAndPassword(
+        email: AppConstants.demoAdminEmail,
+        password: AppConstants.demoAdminPassword,
+      );
+      return;
+    } on FirebaseAuthException catch (e) {
+      if (e.code != 'user-not-found' && e.code != 'invalid-credential') {
+        rethrow;
+      }
+    }
+    final cred = await _auth.createUserWithEmailAndPassword(
+      email: AppConstants.demoAdminEmail,
+      password: AppConstants.demoAdminPassword,
+    );
+    final user = cred.user;
+    if (user != null) {
+      await user.updateDisplayName('SwidShop Admin');
+      await _firestore.createUserProfile(
+        UserModel(
+          uid: user.uid,
+          name: 'SwidShop Admin',
+          email: AppConstants.demoAdminEmail,
+          role: UserRole.admin,
+          createdAt: DateTime.now(),
+        ),
+      );
+    }
+  }
 
   /// Signs in with Google (google_sign_in 7.x). On first sign-in, creates a
   /// `users/{uid}` doc with `profileComplete: false` so the app routes the

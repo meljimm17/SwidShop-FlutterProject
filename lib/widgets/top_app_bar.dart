@@ -23,7 +23,7 @@ class TopAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.onLogout,
     this.notificationCount = 0,
     this.bottom,
-    this.leadingActions = const [],
+    this.extraActions = const [],
   });
 
   final String? title;
@@ -38,8 +38,10 @@ class TopAppBar extends StatelessWidget implements PreferredSizeWidget {
   final int notificationCount;
   final PreferredSizeWidget? bottom;
 
-  /// Extra action buttons shown before search / bell / avatar.
-  final List<Widget> leadingActions;
+  /// Extra action buttons shown on the right, before search / bell / avatar.
+  /// Everything here is a plain ink icon — the user avatar stays the only
+  /// circled element (photos are circles everywhere in the app).
+  final List<Widget> extraActions;
 
   @override
   Size get preferredSize =>
@@ -100,7 +102,7 @@ class TopAppBar extends StatelessWidget implements PreferredSizeWidget {
   }
 
   List<Widget> _actions(BuildContext context) {
-    final widgets = <Widget>[...leadingActions];
+    final widgets = <Widget>[...extraActions];
     if (onSearch != null) {
       widgets.add(
         IconButton(
