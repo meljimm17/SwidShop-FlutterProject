@@ -1,21 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:timeago/timeago.dart' as timeago;
 
 import '../../core/theme.dart';
+import '../../core/utils.dart';
 import '../../models/listing_model.dart';
 import '../../models/report_model.dart';
-import '../../services/firestore_service.dart';
-import '../../widgets/app_card_wrapper.dart';
-import '../../widgets/listing_widgets.dart';
-import '../../widgets/top_app_bar.dart';
-import '../../widgets/type_badge.dart';
+import '../../providers/admin_provider.dart';
 import '../customer/listing_detail_screen.dart';
-import 'admin_gate.dart';
+import 'admin_widgets.dart';
 
-/// Moderate listings: remove violations, clear flags (Phase 4.3).
+/// Listings tab: search, type pills with live counts, flagged banner and
+/// moderation menu (Phase 4.3).
 ///
-/// "Flagged" = has at least one pending report (reports collection, not a
-/// field on the listing). Removing sets status='removed', which instantly
-/// drops the item from every customer query (all filter status=='active').
+/// "Flagged" = at least one pending report on the listing. Removing sets
+/// status='removed', which drops it from every customer feed at once.
 class AdminListingsScreen extends StatefulWidget {
   const AdminListingsScreen({super.key});
 
@@ -24,240 +23,303 @@ class AdminListingsScreen extends StatefulWidget {
 }
 
 class _AdminListingsScreenState extends State<AdminListingsScreen> {
-  final _firestore = FirestoreService();
+  final _searchCtrl = TextEditingController();
+  String _query = '';
   ListingType? _type;
-  int _visible = 25;
+  ListingStatus? _status;
+  bool _flaggedOnly = false;
+  int _visible = 20;
 
-  static const _page = 25;
+  static const _page = 20;
 
-  Future<void> _remove(ListingModel listing) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('Remove this listing?'),
-        content: Text(
-          '"${listing.title}" disappears from Home, Search and every feed immediately.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(false),
-            child: const Text('Keep'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    try {
-      await _firestore.updateListing(
-        listing.listingId,
-        {'status': ListingStatus.removed.value},
-      );
-    } catch (e) {
-      debugPrint('removeListing: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not remove. Try again.'),
-            backgroundColor: AppColors.red,
-          ),
-        );
-      }
-    }
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
-  /// Dismisses every pending report against the listing (clears its flag).
-  Future<void> _clearFlags(
-    ListingModel listing,
-    List<ReportModel> pending,
-  ) async {
-    final related = pending
-        .where((r) =>
-            r.targetType == ReportTargetType.listing &&
-            r.targetId == listing.listingId)
-        .toList();
-    if (related.isEmpty) return;
-    try {
-      await Future.wait(
-        related.map(
-          (r) => _firestore.updateReportStatus(
-            r.reportId,
-            ReportStatus.dismissed,
-          ),
+  Future<void> _pickStatus() async {
+    final picked = await showModalBottomSheet<(ListingStatus?,)>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (d) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 18, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Filter by status',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+            for (final (value, label) in [
+              (null, 'Any status'),
+              (ListingStatus.active, 'Active'),
+              (ListingStatus.sold, 'Sold'),
+              (ListingStatus.expired, 'Expired'),
+              (ListingStatus.removed, 'Removed'),
+            ])
+              ListTile(
+                title: Text(label),
+                trailing: _status == value
+                    ? const Icon(Icons.check, color: AppColors.coralDeep)
+                    : null,
+                onTap: () => Navigator.of(d).pop((value,)),
+              ),
+            const SizedBox(height: 8),
+          ],
         ),
-      );
-    } catch (e) {
-      debugPrint('clearFlags: $e');
+      ),
+    );
+    if (picked != null) {
+      setState(() {
+        _status = picked.$1;
+        _visible = _page;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return AdminGate(
-      child: Scaffold(
-        backgroundColor: AppColors.cream,
-        appBar: const TopAppBar(title: 'Manage Listings'),
-        body: StreamBuilder<List<ReportModel>>(
-          stream: _firestore.streamReportsByStatus(ReportStatus.pending),
-          builder: (context, reportSnap) {
-            final pending = reportSnap.data ?? const <ReportModel>[];
-            final flaggedIds = {
-              for (final r in pending)
-                if (r.targetType == ReportTargetType.listing) r.targetId,
-            };
-            return StreamBuilder<List<ListingModel>>(
-              stream: _firestore.streamAllListings(),
-              builder: (context, snap) {
-                if (snap.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                var items = snap.data ?? const <ListingModel>[];
-                if (_type != null) {
-                  items = items.where((l) => l.type == _type).toList();
-                }
-                // Flagged first, then newest.
-                items.sort((a, b) {
-                  final af = flaggedIds.contains(a.listingId) ? 0 : 1;
-                  final bf = flaggedIds.contains(b.listingId) ? 0 : 1;
-                  if (af != bf) return af.compareTo(bf);
-                  final ac = a.createdAt;
-                  final bc = b.createdAt;
-                  if (ac == null && bc == null) return 0;
-                  if (ac == null) return 1;
-                  if (bc == null) return -1;
-                  return bc.compareTo(ac);
-                });
-                if (items.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      'No listings.',
-                      style: TextStyle(color: AppColors.gray),
-                    ),
-                  );
-                }
-                final shown = items.take(_visible).toList();
-                return Column(
-                  children: [
-                    _chips(),
-                    if (flaggedIds.isNotEmpty)
-                      Container(
-                        width: double.infinity,
-                        margin: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: AppColors.red.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: AppColors.red.withValues(alpha: 0.35),
-                          ),
-                        ),
-                        child: Text(
-                          '${flaggedIds.length} flagged item${flaggedIds.length == 1 ? '' : 's'} need${flaggedIds.length == 1 ? 's' : ''} review.',
-                          style: const TextStyle(
-                            color: AppColors.red,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ),
-                    Expanded(
-                      child: ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: shown.length +
-                            (items.length > _visible ? 1 : 0),
-                        itemBuilder: (context, i) {
-                          if (i >= shown.length) {
-                            return Center(
-                              child: TextButton(
-                                onPressed: () => setState(
-                                  () => _visible += _page,
-                                ),
-                                child: Text(
-                                  'Load more (${items.length - _visible} left)',
-                                ),
-                              ),
-                            );
-                          }
-                          final l = shown[i];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _row(
-                              l,
-                              flagged: flaggedIds.contains(l.listingId),
-                              pending: pending,
-                            ),
-                          );                        },
-                      ),
-                    ),
-                  ],
-                );
-              },
-            );
-          },
-        ),
-      ),
-    );
-  }
+    final a = context.watch<AdminProvider>();
+    final flagged = a.flaggedListingIds;
+    final types = AdminStats.typeCounts(a.listings);
 
-  Widget _chips() {
-    Widget chip(String label, ListingType? type) {
-      final selected = _type == type;
-      return Padding(
-        padding: const EdgeInsets.only(right: 8),
-        child: ChoiceChip(
-          label: Text(label),
-          selected: selected,
-          showCheckmark: false,
-          onSelected: (_) => setState(() {
-            _type = selected ? null : type;
+    var items = a.listings;
+    if (_type != null) items = items.where((l) => l.type == _type).toList();
+    if (_status != null) {
+      items = items.where((l) => l.status == _status).toList();
+    }
+    if (_flaggedOnly) {
+      items = items.where((l) => flagged.contains(l.listingId)).toList();
+    }
+    if (_query.isNotEmpty) {
+      items = items
+          .where(
+            (l) =>
+                l.title.toLowerCase().contains(_query) ||
+                l.listingId.toLowerCase().contains(_query) ||
+                a.nameOf(l.sellerId).toLowerCase().contains(_query),
+          )
+          .toList();
+    }
+    // Flagged first, then newest (stream order).
+    items = [
+      ...items.where((l) => flagged.contains(l.listingId)),
+      ...items.where((l) => !flagged.contains(l.listingId)),
+    ];
+    final shown = items.take(_visible).toList();
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 28),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: AdminSearchField(
+                  controller: _searchCtrl,
+                  hint: 'Search listing ID, title, or seller…',
+                  onChanged: (v) => setState(() {
+                    _query = v.trim().toLowerCase();
+                    _visible = _page;
+                  }),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Material(
+                color: AppColors.surface,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _pickStatus,
+                  child: SizedBox(
+                    width: 52,
+                    height: 52,
+                    child: Badge(
+                      isLabelVisible: _status != null,
+                      smallSize: 9,
+                      backgroundColor: AppColors.coralDeep,
+                      alignment: const AlignmentDirectional(0.45, -0.45),
+                      child: const Icon(Icons.tune, color: AppColors.ink),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        PillRow<ListingType?>(
+          selected: _type,
+          onSelected: (t) => setState(() {
+            _type = t;
             _visible = _page;
           }),
-          selectedColor: AppColors.coral,
-          labelStyle: TextStyle(
-            color: selected ? Colors.white : AppColors.ink,
-            fontWeight: FontWeight.w600,
+          options: [
+            PillOption(null, 'All ${a.listings.length}'),
+            PillOption(ListingType.bid, 'Bidding ${types[ListingType.bid]}'),
+            PillOption(ListingType.swap, 'Swap ${types[ListingType.swap]}'),
+            PillOption(
+              ListingType.buyNow,
+              'Buy Now ${types[ListingType.buyNow]}',
+            ),
+          ],
+        ),
+        if (flagged.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+            decoration: BoxDecoration(
+              color: AppColors.coral.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.warning_amber_rounded,
+                  color: AppColors.coralDeep,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      text: '${flagged.length} Flagged ',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.coralDeep,
+                      ),
+                      children: const [
+                        TextSpan(
+                          text: 'listing reports to review',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w500,
+                            color: AppColors.ink,
+                          ),
+                        ),
+                      ],
+                    ),
+                    style: const TextStyle(fontSize: 13.5),
+                  ),
+                ),
+                FilledButton(
+                  onPressed: () => setState(() {
+                    _flaggedOnly = !_flaggedOnly;
+                    _visible = _page;
+                  }),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.coralDeep,
+                    shape: const StadiumBorder(),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: Text(_flaggedOnly ? 'SHOW ALL' : 'INSPECT'),
+                ),
+              ],
+            ),
           ),
-          backgroundColor: AppColors.surface,
-          side: BorderSide(
-            color: selected ? AppColors.coral : AppColors.line,
+        const SizedBox(height: 12),
+        if (shown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(32),
+            child: Center(
+              child: Text(
+                'No listings match.',
+                style: TextStyle(color: AppColors.gray),
+              ),
+            ),
           ),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(999),
+        for (final l in shown)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: _ListingCard(
+              listing: l,
+              flaggedCount: AdminStats.pendingFor(a.reports, l.listingId),
+            ),
+          ),
+        if (items.length > _visible)
+          Center(
+            child: TextButton(
+              onPressed: () => setState(() => _visible += _page),
+              child: Text('Load more (${items.length - _visible} left)'),
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Text(
+            'Showing ${shown.length} of ${items.length} listing${items.length == 1 ? '' : 's'}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.gray,
+            ),
           ),
         ),
-      );
-    }
-
-    return SizedBox(
-      height: 48,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-        children: [
-          chip('All', null),
-          chip('Buy Now', ListingType.buyNow),
-          chip('Bidding', ListingType.bid),
-          chip('Swap', ListingType.swap),
-        ],
-      ),
+      ],
     );
   }
+}
 
-  Widget _row(
-    ListingModel listing, {
-    required bool flagged,
-    required List<ReportModel> pending,
-  }) {
-    return AppCardWrapper(
+class _ListingCard extends StatelessWidget {
+  const _ListingCard({required this.listing, required this.flaggedCount});
+
+  final ListingModel listing;
+  final int flaggedCount;
+
+  String _typeText() {
+    final l = listing;
+    final price = l.displayPrice;
+    switch (l.type) {
+      case ListingType.swap:
+        return l.swapWants.isEmpty ? 'Swap' : 'Swap (ISO: ${l.swapWants})';
+      case ListingType.bid:
+      case ListingType.buyNow:
+        return price == null
+            ? typeLabel(l.type)
+            : '${typeLabel(l.type)} ${AppUtils.formatCurrency(price)}';
+    }
+  }
+
+  String _meta(AdminProvider a) {
+    final l = listing;
+    final seller = a.nameOf(l.sellerId);
+    if (l.type == ListingType.bid &&
+        l.status == ListingStatus.active &&
+        l.auctionEndAt != null &&
+        l.auctionEndAt!.isAfter(DateTime.now())) {
+      return '$seller • ${AppUtils.timeRemaining(l.auctionEndAt)}';
+    }
+    if (l.createdAt == null) return seller;
+    return '$seller • ${timeago.format(l.createdAt!)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = context.watch<AdminProvider>();
+    final l = listing;
+    final inactive = l.status != ListingStatus.active;
+    return AdminCard(
+      radius: 16,
+      padding: const EdgeInsets.fromLTRB(12, 12, 0, 12),
+      onTap: () => _view(context),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ListingThumb(
-            url: listing.images.isNotEmpty ? listing.images.first : '',
-            size: 56,
+          Opacity(
+            opacity: inactive ? 0.6 : 1,
+            child: TaggedThumb(
+              url: l.images.isNotEmpty ? l.images.first : '',
+              tag: AdminStats.shortCode('ID', l.listingId),
+              width: 104,
+              height: 104,
+            ),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -265,75 +327,197 @@ class _AdminListingsScreenState extends State<AdminListingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  listing.title,
+                  l.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+                  style: TextStyle(
+                    fontSize: 16.5,
+                    fontWeight: FontWeight.w700,
+                    color: inactive ? AppColors.gray : AppColors.ink,
+                  ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 3),
+                Text(
+                  _meta(a),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5, color: AppColors.gray),
+                ),
+                const SizedBox(height: 8),
                 Wrap(
                   spacing: 6,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+                  runSpacing: 6,
                   children: [
-                    UserNameText(
-                      listing.sellerId,
-                      style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.gray,
-                      ),
+                    SoftPill(
+                      _typeText(),
+                      color: inactive ? AppColors.gray : typeColor(l.type),
+                      icon: typeIcon(l.type),
                     ),
-                    TypeBadge(listing.type),
-                    StatusPill(
-                      listing.status.value,
-                      color: listing.status == ListingStatus.active
-                          ? AppColors.green
-                          : AppColors.gray,
-                    ),
-                    if (flagged)
-                      const Icon(
-                        Icons.flag,
-                        size: 16,
+                    StatusTag(status: l.status),
+                    if (flaggedCount > 0)
+                      SoftPill(
+                        flaggedCount == 1
+                            ? 'Flagged'
+                            : 'Flagged ×$flaggedCount',
                         color: AppColors.red,
+                        dot: true,
                       ),
                   ],
                 ),
               ],
             ),
           ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: AppColors.gray),
-            onSelected: (action) {
-              switch (action) {
-                case 'view':
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => ListingDetailScreen(
-                        listingId: listing.listingId,
-                      ),
-                    ),
-                  );
-                case 'remove':
-                  _remove(listing);
-                case 'clear':
-                  _clearFlags(listing, pending);
-              }
-            },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'view', child: Text('View')),
-              if (flagged)
-                const PopupMenuItem(
-                  value: 'clear',
-                  child: Text('Clear flags'),
-                ),
-              if (listing.status == ListingStatus.active)
-                const PopupMenuItem(
-                  value: 'remove',
-                  child: Text('Remove Listing'),
-                ),
-            ],
-          ),
+          _ListingMenu(listing: l, flagged: flaggedCount > 0),
         ],
       ),
+    );
+  }
+
+  void _view(BuildContext context) => Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => ListingDetailScreen(listingId: listing.listingId),
+    ),
+  );
+}
+
+/// Listing status pill (Active · Sold · Expired · Removed).
+class StatusTag extends StatelessWidget {
+  const StatusTag({super.key, required this.status});
+
+  final ListingStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (status) {
+      ListingStatus.active => ('Active', AppColors.green),
+      ListingStatus.sold => ('Sold', AppColors.coral),
+      ListingStatus.expired => ('Expired', AppColors.gray),
+      ListingStatus.removed => ('Removed', AppColors.red),
+    };
+    return SoftPill(label, color: color, dot: true);
+  }
+}
+
+class _ListingMenu extends StatelessWidget {
+  const _ListingMenu({required this.listing, required this.flagged});
+
+  final ListingModel listing;
+  final bool flagged;
+
+  Future<void> _remove(BuildContext context) async {
+    final ok = await confirmAdminAction(
+      context,
+      title: 'Remove this listing?',
+      message:
+          '"${listing.title}" disappears from Home, Search and every feed '
+          'immediately. Pending reports on it are closed as removed.',
+      confirmLabel: 'Remove',
+    );
+    if (!ok || !context.mounted) return;
+    final a = context.read<AdminProvider>();
+    try {
+      await a.firestore.updateListing(listing.listingId, {
+        'status': ListingStatus.removed.value,
+      });
+      await Future.wait(
+        a.pendingReports
+            .where((r) => r.targetId == listing.listingId)
+            .map(
+              (r) => a.firestore.updateReportStatus(
+                r.reportId,
+                ReportStatus.removed,
+              ),
+            ),
+      );
+    } catch (e) {
+      debugPrint('removeListing: $e');
+      if (context.mounted) {
+        showAdminError(context, 'Could not remove. Try again.');
+      }
+    }
+  }
+
+  Future<void> _clear(BuildContext context) async {
+    final a = context.read<AdminProvider>();
+    try {
+      await Future.wait(
+        a.pendingReports
+            .where(
+              (r) =>
+                  r.targetType == ReportTargetType.listing &&
+                  r.targetId == listing.listingId,
+            )
+            .map(
+              (r) => a.firestore.updateReportStatus(
+                r.reportId,
+                ReportStatus.dismissed,
+              ),
+            ),
+      );
+    } catch (e) {
+      debugPrint('clearFlags: $e');
+      if (context.mounted) {
+        showAdminError(context, 'Could not clear. Try again.');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert, color: AppColors.ink),
+      color: AppColors.surface,
+      onSelected: (v) {
+        switch (v) {
+          case 'view':
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) =>
+                    ListingDetailScreen(listingId: listing.listingId),
+              ),
+            );
+          case 'clear':
+            _clear(context);
+          case 'remove':
+            _remove(context);
+        }
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem(
+          value: 'view',
+          child: Row(
+            children: [
+              Icon(Icons.visibility_outlined, size: 20),
+              SizedBox(width: 12),
+              Text('View Listing'),
+            ],
+          ),
+        ),
+        if (flagged)
+          const PopupMenuItem(
+            value: 'clear',
+            child: Row(
+              children: [
+                Icon(Icons.flag_outlined, size: 20, color: AppColors.teal),
+                SizedBox(width: 12),
+                Text('Clear Flags', style: TextStyle(color: AppColors.teal)),
+              ],
+            ),
+          ),
+        if (listing.status != ListingStatus.removed) ...[
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: 'remove',
+            child: Row(
+              children: [
+                Icon(Icons.delete_outline, size: 20, color: AppColors.red),
+                SizedBox(width: 12),
+                Text('Remove Listing', style: TextStyle(color: AppColors.red)),
+              ],
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

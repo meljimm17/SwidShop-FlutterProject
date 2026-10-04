@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+import 'package:timeago/timeago.dart' as timeago;
 
 import '../../core/theme.dart';
 import '../../core/utils.dart';
@@ -6,17 +9,17 @@ import '../../models/listing_model.dart';
 import '../../models/notification_model.dart';
 import '../../models/report_model.dart';
 import '../../models/user_model.dart';
-import '../../services/firestore_service.dart';
-import '../../widgets/app_card_wrapper.dart';
-import '../../widgets/listing_widgets.dart';
-import '../../widgets/top_app_bar.dart';
-import '../../widgets/type_badge.dart';
+import '../../providers/admin_provider.dart';
 import '../customer/listing_detail_screen.dart';
-import 'admin_gate.dart';
+import 'admin_users_screen.dart';
+import 'admin_widgets.dart';
 
-/// Pending user/listing reports, oldest first (Phase 4.6).
+enum _StatusView { pendingFirst, pending, resolved }
+
+/// Reports tab: live triage queue for user and listing reports (Phase 4.6).
 ///
-/// Every action updates BOTH the report record and its real target.
+/// Every action updates the report AND its real target (account status,
+/// listing status, or a warning notification).
 class AdminReportsScreen extends StatefulWidget {
   const AdminReportsScreen({super.key});
 
@@ -24,100 +27,286 @@ class AdminReportsScreen extends StatefulWidget {
   State<AdminReportsScreen> createState() => _AdminReportsScreenState();
 }
 
-class _AdminReportsScreenState extends State<AdminReportsScreen>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 2, vsync: this);
-  final _firestore = FirestoreService();
-
-  @override
-  void dispose() {
-    _tabs.dispose();
-    super.dispose();
-  }
+class _AdminReportsScreenState extends State<AdminReportsScreen> {
+  ReportTargetType _kind = ReportTargetType.user;
+  _StatusView _view = _StatusView.pendingFirst;
+  bool _newestFirst = false;
 
   @override
   Widget build(BuildContext context) {
-    return AdminGate(
-      child: Scaffold(
-        backgroundColor: AppColors.cream,
-        appBar: TopAppBar(
-          title: 'Report Queue',
-          bottom: TabBar(
-            controller: _tabs,
-            labelColor: AppColors.coral,
-            unselectedLabelColor: AppColors.gray,
-            indicatorColor: AppColors.coral,
-            tabs: const [
-              Tab(text: 'Reported Users'),
-              Tab(text: 'Reported Listings'),
+    final a = context.watch<AdminProvider>();
+    List<ReportModel> of(ReportTargetType k) =>
+        a.reports.where((r) => r.targetType == k).toList();
+    final users = of(ReportTargetType.user);
+    final listings = of(ReportTargetType.listing);
+    int pendingIn(List<ReportModel> rs) =>
+        rs.where((r) => r.status == ReportStatus.pending).length;
+
+    final base = _kind == ReportTargetType.user ? users : listings;
+    var list = switch (_view) {
+      _StatusView.pending =>
+        base.where((r) => r.status == ReportStatus.pending).toList(),
+      _StatusView.resolved =>
+        base.where((r) => r.status != ReportStatus.pending).toList(),
+      _StatusView.pendingFirst => base.toList(),
+    };
+    int byDate(ReportModel x, ReportModel y) {
+      final ax = x.createdAt ?? DateTime.now();
+      final ay = y.createdAt ?? DateTime.now();
+      return _newestFirst ? ay.compareTo(ax) : ax.compareTo(ay);
+    }
+
+    list.sort((x, y) {
+      if (_view == _StatusView.pendingFirst) {
+        final px = x.status == ReportStatus.pending ? 0 : 1;
+        final py = y.status == ReportStatus.pending ? 0 : 1;
+        if (px != py) return px.compareTo(py);
+      }
+      return byDate(x, y);
+    });
+
+    // Targets with 3+ open reports at once — escalate.
+    final openByTarget = <String, int>{};
+    for (final r in base.where((r) => r.status == ReportStatus.pending)) {
+      openByTarget[r.targetId] = (openByTarget[r.targetId] ?? 0) + 1;
+    }
+    final escalated = openByTarget.values.where((n) => n >= 3).length;
+    final resolved = base.where((r) => r.status != ReportStatus.pending).length;
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 28),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Row(
+            children: [
+              Container(
+                width: 9,
+                height: 9,
+                decoration: const BoxDecoration(
+                  color: AppColors.red,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Live Triage Queue',
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                ),
+              ),
+              SoftPill(
+                '${a.pendingQueueCount} open',
+                color: AppColors.ink,
+                icon: Icons.shield_outlined,
+              ),
             ],
           ),
         ),
-        body: StreamBuilder<List<ReportModel>>(
-          stream:
-              _firestore.streamReportsByStatus(ReportStatus.pending),
-          builder: (context, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            final pending = snap.data ?? const <ReportModel>[];
-            return TabBarView(
-              controller: _tabs,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: AppColors.mist,
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Row(
               children: [
-                _ReportList(
-                  reports: pending
-                      .where((r) =>
-                          r.targetType == ReportTargetType.user)
-                      .toList(),
-                  kind: ReportTargetType.user,
+                _segment(
+                  ReportTargetType.user,
+                  Icons.person_outline,
+                  'Reported Users (${pendingIn(users)})',
                 ),
-                _ReportList(
-                  reports: pending
-                      .where((r) =>
-                          r.targetType == ReportTargetType.listing)
-                      .toList(),
-                  kind: ReportTargetType.listing,
+                _segment(
+                  ReportTargetType.listing,
+                  Icons.storefront_outlined,
+                  'Reported Listings (${pendingIn(listings)})',
                 ),
               ],
-            );
-          },
+            ),
+          ),
         ),
-      ),
+        const SizedBox(height: 10),
+        PillRow<_StatusView>(
+          compact: true,
+          selected: _view,
+          onSelected: (v) => setState(() => _view = v),
+          options: const [
+            PillOption(
+              _StatusView.pendingFirst,
+              'Pending first',
+              icon: Icons.assignment_outlined,
+            ),
+            PillOption(_StatusView.pending, 'Open only'),
+            PillOption(_StatusView.resolved, 'Resolved'),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => setState(() => _newestFirst = !_newestFirst),
+              style: TextButton.styleFrom(foregroundColor: AppColors.ink),
+              icon: const Icon(Icons.swap_vert, size: 18),
+              label: Text(
+                _newestFirst ? 'Sort: Newest first' : 'Sort: Oldest first',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ),
+        if (escalated > 0)
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: AppColors.amber.withValues(alpha: 0.22),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                const CircleAvatar(
+                  radius: 20,
+                  backgroundColor: Color(0xFF9A6200),
+                  child: Icon(Icons.priority_high, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Escalation',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF7A4A00),
+                        ),
+                      ),
+                      Text(
+                        '$escalated ${_kind == ReportTargetType.user ? 'account' : 'listing'}'
+                        '${escalated == 1 ? ' has' : 's have'} 3+ open reports',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: Color(0xFF7A4A00),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (list.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(32),
+            child: Center(
+              child: Text(
+                _view == _StatusView.resolved
+                    ? 'Nothing resolved yet.'
+                    : 'Queue is clear — no reports here.',
+                style: const TextStyle(color: AppColors.gray),
+              ),
+            ),
+          ),
+        for (final r in list)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            child: _ReportCard(key: ValueKey(r.reportId), report: r),
+          ),
+        if (base.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: AdminCard(
+              color: AppColors.mist,
+              radius: 999,
+              padding: const EdgeInsets.fromLTRB(12, 12, 20, 12),
+              child: Row(
+                children: [
+                  const CircleAvatar(
+                    radius: 22,
+                    backgroundColor: Color(0xFFBDEFD9),
+                    child: Icon(
+                      Icons.verified_user_outlined,
+                      color: AppColors.teal,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Resolution rate ${(resolved / base.length * 100).round()}%',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          '$resolved resolved · ${base.length - resolved} open '
+                          'of ${base.length} ${_kind == ReportTargetType.user ? 'user' : 'listing'} reports',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            color: AppColors.gray,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
-}
 
-class _ReportList extends StatelessWidget {
-  const _ReportList({required this.reports, required this.kind});
-
-  final List<ReportModel> reports;
-  final ReportTargetType kind;
-
-  @override
-  Widget build(BuildContext context) {
-    if (reports.isEmpty) {
-      return Center(
-        child: Text(
-          kind == ReportTargetType.user
-              ? 'No pending user reports.'
-              : 'No pending listing reports.',
-          style: const TextStyle(color: AppColors.gray),
+  Widget _segment(ReportTargetType kind, IconData icon, String label) {
+    final on = _kind == kind;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _kind = kind),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 6),
+          decoration: BoxDecoration(
+            color: on ? AppColors.surface : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 17,
+                color: on ? AppColors.coralDeep : AppColors.gray,
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: on ? AppColors.coralDeep : AppColors.ink,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
-      );
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: reports.length,
-      itemBuilder: (context, i) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: _ReportCard(report: reports[i]),
       ),
     );
   }
 }
 
 class _ReportCard extends StatefulWidget {
-  const _ReportCard({required this.report});
+  const _ReportCard({super.key, required this.report});
 
   final ReportModel report;
 
@@ -126,76 +315,78 @@ class _ReportCard extends StatefulWidget {
 }
 
 class _ReportCardState extends State<_ReportCard> {
-  final _firestore = FirestoreService();
   bool _busy = false;
 
-  ReportModel get _report => widget.report;
-
-  Future<void> _resolve(ReportStatus status) async {
-    setState(() => _busy = true);
-    try {
-      await _firestore.updateReportStatus(_report.reportId, status);
-    } catch (e) {
-      debugPrint('resolveReport: $e');
-      if (mounted) {
-        setState(() => _busy = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not update. Try again.'),
-            backgroundColor: AppColors.red,
-          ),
-        );
-      }
-    }
-  }
+  ReportModel get _r => widget.report;
 
   Future<void> _act(String action) async {
+    final a = context.read<AdminProvider>();
+    final fs = a.firestore;
+    final isUser = _r.targetType == ReportTargetType.user;
+    final listing = isUser ? null : a.listing(_r.targetId);
+    final targetName = isUser
+        ? a.nameOf(_r.targetId)
+        : (listing?.title ?? 'this listing');
+
+    if (action != 'dismiss') {
+      final ok = await confirmAdminAction(
+        context,
+        title: switch (action) {
+          'warn' => isUser ? 'Warn $targetName?' : 'Warn the seller?',
+          'suspend' => 'Suspend $targetName?',
+          _ => 'Remove "$targetName"?',
+        },
+        message: switch (action) {
+          'warn' =>
+            'They get an in-app warning and the report is closed as warned.',
+          'suspend' =>
+            'The account is signed out and blocked until re-activated.',
+          _ => 'The listing disappears from every feed immediately.',
+        },
+        confirmLabel: switch (action) {
+          'warn' => 'Send warning',
+          'suspend' => 'Suspend',
+          _ => 'Remove',
+        },
+        destructive: action != 'warn',
+      );
+      if (!ok || !mounted) return;
+    }
+
     setState(() => _busy = true);
     try {
       switch (action) {
+        case 'dismiss':
+          await fs.updateReportStatus(_r.reportId, ReportStatus.dismissed);
         case 'warn':
-          await _firestore.updateReportStatus(
-            _report.reportId,
-            ReportStatus.warned,
-          );
-          await _firestore.addNotification(
-            _report.targetId,
-            const NotificationModel(
-              type: NotificationType.system,
-              message:
-                  'An admin reviewed reports about your account. Please keep listings honest and respectful.',
-              relatedId: '',
-            ),
-          );
+          final recipient = isUser ? _r.targetId : (listing?.sellerId ?? '');
+          if (recipient.isNotEmpty) {
+            await fs.addNotification(
+              recipient,
+              NotificationModel(
+                type: NotificationType.system,
+                message: isUser
+                    ? 'An admin reviewed reports about your account. Please '
+                          'keep listings honest and deals respectful.'
+                    : 'An admin reviewed a report on "${listing?.title ?? 'your listing'}". '
+                          'Please make sure it is accurate and allowed.',
+                relatedId: isUser ? '' : 'listing:${_r.targetId}',
+              ),
+            );
+          }
+          await fs.updateReportStatus(_r.reportId, ReportStatus.warned);
         case 'suspend':
-          await _firestore.updateAccountStatus(
-            _report.targetId,
-            AccountStatus.suspended,
-          );
-          await _firestore.updateReportStatus(
-            _report.reportId,
-            ReportStatus.suspended,
-          );
+          await fs.updateAccountStatus(_r.targetId, AccountStatus.suspended);
+          await fs.updateReportStatus(_r.reportId, ReportStatus.suspended);
         case 'remove':
-          await _firestore.updateListing(
-            _report.targetId,
-            {'status': ListingStatus.removed.value},
-          );
-          await _firestore.updateReportStatus(
-            _report.reportId,
-            ReportStatus.removed,
-          );
+          await fs.updateListing(_r.targetId, {
+            'status': ListingStatus.removed.value,
+          });
+          await fs.updateReportStatus(_r.reportId, ReportStatus.removed);
       }
     } catch (e) {
       debugPrint('reportAction: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Action failed. Try again.'),
-            backgroundColor: AppColors.red,
-          ),
-        );
-      }
+      if (mounted) showAdminError(context, 'Action failed. Try again.');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -203,180 +394,305 @@ class _ReportCardState extends State<_ReportCard> {
 
   @override
   Widget build(BuildContext context) {
-    final isUser = _report.targetType == ReportTargetType.user;
-    return AppCardWrapper(
+    final a = context.watch<AdminProvider>();
+    final pending = _r.status == ReportStatus.pending;
+    final color = pending
+        ? (_r.createdAt != null &&
+                  DateTime.now().difference(_r.createdAt!).inHours >= 24
+              ? AppColors.red
+              : AppColors.amber)
+        : AppColors.teal;
+    final reporter = a.user(_r.reportedBy);
+    final isUser = _r.targetType == ReportTargetType.user;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: pending ? AppColors.surface : AppColors.mist,
+        borderRadius: BorderRadius.circular(22),
+        border: Border(left: BorderSide(color: color, width: 5)),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Text(
-                  _report.reason.isEmpty
-                      ? 'No reason given'
-                      : '"${_report.reason}"',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    height: 1.35,
-                  ),
-                ),
-              ),
-              Text(
-                _report.createdAt == null
-                    ? ''
-                    : AppUtils.formatDate(_report.createdAt),
-                style:
-                    const TextStyle(fontSize: 11, color: AppColors.gray),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          _targetPreview(),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(
-                child: UserNameText(
-                  _report.reportedBy,
-                  style:
-                      const TextStyle(fontSize: 12, color: AppColors.gray),
-                ),
-              ),
-              FutureBuilder<List<ReportModel>>(
-                future: _firestore.reportsForTarget(_report.targetId),
-                builder: (context, snap) {
-                  final strikes = (snap.data ?? const <ReportModel>[])
-                      .where((r) => r.status != ReportStatus.pending)
-                      .length;
-                  return Text(
-                    strikes == 0
-                        ? 'first report'
-                        : '$strikes prior action${strikes == 1 ? '' : 's'}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.red,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _resolve(ReportStatus.dismissed),
-                child: const Text('Dismiss'),
-              ),
-              if (isUser) ...[
-                OutlinedButton(
-                  onPressed: _busy ? null : () => _act('warn'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.amber,
-                    side: const BorderSide(color: AppColors.amber),
-                  ),
-                  child: const Text('Warn User'),
-                ),
-                FilledButton(
-                  onPressed: _busy ? null : () => _act('suspend'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.red,
-                  ),
-                  child: const Text('Suspend Account'),
-                ),
-              ] else
-                FilledButton(
-                  onPressed: _busy ? null : () => _act('remove'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.red,
-                  ),
-                  child: const Text('Remove Listing'),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Live preview of the reported target.
-  Widget _targetPreview() {
-    if (_report.targetType == ReportTargetType.user) {
-      return UserLookup(
-        uid: _report.targetId,
-        builder: (context, user) => Row(
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: AppColors.cream,
-              backgroundImage: (user?.photoUrl.isNotEmpty ?? false)
-                  ? NetworkImage(user!.photoUrl)
-                  : null,
-              child: (user?.photoUrl.isNotEmpty ?? false)
-                  ? null
-                  : const Icon(Icons.person_outline,
-                      color: AppColors.gray, size: 18),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: UserNameText(
-                _report.targetId,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return FutureBuilder<ListingModel?>(
-      future: _firestore.getListing(_report.targetId),
-      builder: (context, snap) {
-        final l = snap.data;
-        if (l == null) {
-          return const Text(
-            'Listing unavailable (maybe removed).',
-            style: TextStyle(fontSize: 13, color: AppColors.gray),
-          );
-        }
-        return GestureDetector(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => ListingDetailScreen(listingId: l.listingId),
-            ),
-          ),
-          child: Row(
-            children: [
-              ListingThumb(
-                url: l.images.isNotEmpty ? l.images.first : '',
-                size: 44,
-              ),
+              AdminAvatar(user: reporter, size: 38, showStatus: false),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      l.title,
+                      'Reported by ${a.nameOf(_r.reportedBy)}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                    const SizedBox(height: 2),
-                    TypeBadge(l.type),
+                    Text(
+                      '${_r.createdAt == null ? 'just now' : timeago.format(_r.createdAt!)}'
+                      ' • Case ${AdminStats.shortCode('REP', _r.reportId)}',
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: AppColors.gray,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right, color: AppColors.gray),
+              SoftPill(
+                pending ? 'Pending' : 'Resolved',
+                color: pending ? const Color(0xFF9A6200) : AppColors.teal,
+                icon: pending
+                    ? Icons.hourglass_top
+                    : Icons.check_circle_outline,
+                solid: pending,
+              ),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          if (isUser) _userTarget(a) else _listingTarget(a),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+                size: 17,
+                color: pending ? AppColors.coralDeep : AppColors.gray,
+              ),
+              const SizedBox(width: 6),
+              CapsLabel(
+                isUser ? 'User report' : 'Listing report',
+                color: pending ? AppColors.coralDeep : AppColors.gray,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _r.reason.isEmpty ? 'No reason given.' : '“${_r.reason}”',
+            style: const TextStyle(fontSize: 14.5, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          if (pending)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _actionButton(
+                  'Dismiss',
+                  AppColors.mist,
+                  AppColors.ink,
+                  () => _act('dismiss'),
+                ),
+                _actionButton(
+                  isUser ? 'Warn User' : 'Warn Seller',
+                  AppColors.amber.withValues(alpha: 0.25),
+                  const Color(0xFF7A4A00),
+                  () => _act('warn'),
+                ),
+                if (isUser)
+                  _actionButton(
+                    'Suspend Account',
+                    const Color(0xFF8A5200),
+                    Colors.white,
+                    () => _act('suspend'),
+                  )
+                else
+                  _actionButton(
+                    'Remove Listing',
+                    AppColors.red,
+                    Colors.white,
+                    () => _act('remove'),
+                  ),
+              ],
+            )
+          else
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.green.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.verified_user_outlined,
+                    color: AppColors.teal,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Resolved as ${reportStatusLabel(_r.status).toLowerCase()}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.teal,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionButton(String label, Color bg, Color fg, VoidCallback onTap) {
+    return FilledButton(
+      onPressed: _busy ? null : onTap,
+      style: FilledButton.styleFrom(
+        backgroundColor: bg,
+        foregroundColor: fg,
+        shape: const StadiumBorder(),
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      ),
+      child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+    );
+  }
+
+  Widget _userTarget(AdminProvider a) {
+    final u = a.user(_r.targetId);
+    final strikes = AdminStats.strikesFor(a.reports, _r.targetId);
+    return InkWell(
+      onTap: () => openAdminUserDetail(context, _r.targetId),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.paper,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            AdminAvatar(user: u, size: 42),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    a.nameOf(_r.targetId),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  if (u != null)
+                    Text(
+                      [
+                        if (u.createdAt != null)
+                          'Member since ${DateFormat('MMM y').format(u.createdAt!)}',
+                        if (u.address.city.isNotEmpty) u.address.city,
+                      ].join(' • '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppColors.gray,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            SoftPill(
+              strikes == 0
+                  ? 'No prior strikes'
+                  : '$strikes prev strike${strikes == 1 ? '' : 's'}',
+              color: strikes == 0 ? AppColors.gray : AppColors.red,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _listingTarget(AdminProvider a) {
+    final l = a.listing(_r.targetId);
+    if (l == null) {
+      return const Text(
+        'Listing unavailable (deleted).',
+        style: TextStyle(fontSize: 13, color: AppColors.gray),
+      );
+    }
+    final strikes = AdminStats.strikesFor(a.reports, l.sellerId);
+    return InkWell(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ListingDetailScreen(listingId: l.listingId),
+        ),
+      ),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: AppColors.paper,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            TaggedThumb(
+              url: l.images.isNotEmpty ? l.images.first : '',
+              width: 56,
+              height: 56,
+              radius: 10,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  Text(
+                    '${a.nameOf(l.sellerId)}'
+                    '${strikes > 0 ? ' • $strikes seller strike${strikes == 1 ? '' : 's'}' : ''}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: AppColors.gray),
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      SoftPill(
+                        l.displayPrice == null
+                            ? typeLabel(l.type)
+                            : '${typeLabel(l.type)} ${AppUtils.formatCurrency(l.displayPrice)}',
+                        color: typeColor(l.type),
+                        fontSize: 10.5,
+                      ),
+                      if (l.status == ListingStatus.removed)
+                        const SoftPill(
+                          'Removed',
+                          color: AppColors.red,
+                          fontSize: 10.5,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: AppColors.gray),
+          ],
+        ),
+      ),
     );
   }
 }

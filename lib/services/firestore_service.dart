@@ -761,6 +761,26 @@ class FirestoreService {
         return reports;
       });
 
+  /// Every report regardless of status, newest first (client sort).
+  Stream<List<ReportModel>> streamAllReports() =>
+      _reports.snapshots().map((snap) {
+        final reports = snap.docs
+            .map((d) => ReportModel.fromMap(d.id, d.data()))
+            .toList();
+        reports
+            .sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return reports;
+      });
+
+  /// Rewrites `sortOrder` for every category in the given order (one batch).
+  Future<void> reorderCategories(List<String> categoryIdsInOrder) async {
+    final batch = _db.batch();
+    for (var i = 0; i < categoryIdsInOrder.length; i++) {
+      batch.update(_categories.doc(categoryIdsInOrder[i]), {'sortOrder': i});
+    }
+    await batch.commit();
+  }
+
   /// Every report ever filed against one target (prior-strikes context).
   Future<List<ReportModel>> reportsForTarget(String targetId) async {
     final snap =

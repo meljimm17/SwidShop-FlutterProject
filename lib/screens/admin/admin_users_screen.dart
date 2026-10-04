@@ -1,22 +1,79 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+import 'package:timeago/timeago.dart' as timeago;
 
 import '../../core/theme.dart';
 import '../../core/utils.dart';
+import '../../models/listing_model.dart';
 import '../../models/report_model.dart';
 import '../../models/transaction_model.dart';
 import '../../models/user_model.dart';
-import '../../services/firestore_service.dart';
-import '../../widgets/app_card_wrapper.dart';
-import '../../widgets/listing_widgets.dart';
-import '../../widgets/star_rating_display.dart';
-import '../../widgets/top_app_bar.dart';
-import '../../widgets/trusted_badge.dart';
+import '../../providers/admin_provider.dart';
+import '../../providers/auth_provider.dart';
+import '../shared/transaction_chat_screen.dart';
 import 'admin_gate.dart';
+import 'admin_widgets.dart';
 
-/// Browse, suspend and ban accounts (Phase 4.2).
-///
-/// Suspended/banned users are signed out by the app on next profile sync
-/// (interim client-side enforcement — token revocation needs the function).
+/// Pushes the full-screen user detail panel, carrying the shell's
+/// [AdminProvider] into the new route.
+void openAdminUserDetail(BuildContext context, String uid) {
+  final admin = context.read<AdminProvider>();
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => ChangeNotifierProvider.value(
+        value: admin,
+        child: AdminGate(child: AdminUserDetailScreen(uid: uid)),
+      ),
+    ),
+  );
+}
+
+/// Suspend / ban / re-activate with confirmation. Returns true on success.
+Future<bool> setAccountStatusFlow(
+  BuildContext context,
+  UserModel user,
+  AccountStatus status,
+) async {
+  final name = user.name.isEmpty ? user.email : user.name;
+  final ok = await confirmAdminAction(
+    context,
+    title: switch (status) {
+      AccountStatus.active => 'Re-activate $name?',
+      AccountStatus.suspended => 'Suspend $name?',
+      AccountStatus.banned => 'Ban $name?',
+    },
+    message: status == AccountStatus.active
+        ? 'They will be able to sign in again.'
+        : 'They are signed out on their next sync and blocked from '
+              'signing in until an admin re-activates the account.',
+    confirmLabel: switch (status) {
+      AccountStatus.active => 'Re-activate',
+      AccountStatus.suspended => 'Suspend',
+      AccountStatus.banned => 'Ban',
+    },
+    destructive: status != AccountStatus.active,
+  );
+  if (!ok || !context.mounted) return false;
+  try {
+    await context.read<AdminProvider>().firestore.updateAccountStatus(
+      user.uid,
+      status,
+    );
+    return true;
+  } catch (e) {
+    debugPrint('updateAccountStatus: $e');
+    if (context.mounted) {
+      showAdminError(context, 'Could not update. Try again.');
+    }
+    return false;
+  }
+}
+
+/// Users tab: search, role pills with live counts, moderation tiles and
+/// paged user cards (Phase 4.2).
 class AdminUsersScreen extends StatefulWidget {
   const AdminUsersScreen({super.key});
 
@@ -25,13 +82,12 @@ class AdminUsersScreen extends StatefulWidget {
 }
 
 class _AdminUsersScreenState extends State<AdminUsersScreen> {
-  final _firestore = FirestoreService();
   final _searchCtrl = TextEditingController();
-  String _roleTab = 'All';
+  UserRole? _role;
   String _query = '';
-  int _visible = 25;
+  int _page = 0;
 
-  static const _page = 25;
+  static const _pageSize = 10;
 
   @override
   void dispose() {
@@ -41,222 +97,998 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AdminGate(
-      child: Scaffold(
-        backgroundColor: AppColors.cream,
-        appBar: const TopAppBar(title: 'Manage Users'),
-        body: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: TextField(
-                controller: _searchCtrl,
-                decoration: InputDecoration(
-                  hintText: 'Search name or email',
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: _query.isEmpty
-                      ? null
-                      : IconButton(
-                          icon: const Icon(Icons.clear),
-                          onPressed: () {
-                            _searchCtrl.clear();
-                            setState(() {
-                              _query = '';
-                              _visible = _page;
-                            });
-                          },
-                        ),
-                ),
-                onChanged: (v) => setState(() {
-                  _query = v.trim().toLowerCase();
-                  _visible = _page;
-                }),
-              ),
+    final a = context.watch<AdminProvider>();
+    final roles = AdminStats.roleCounts(a.users);
+    final flagged = a.flaggedUserIds;
+    final sellers = a.users.where(
+      (u) => u.role == UserRole.seller || u.role == UserRole.both,
+    );
+    final activeSellers = sellers
+        .where((u) => u.accountStatus == AccountStatus.active)
+        .length;
+    final banned = a.users
+        .where((u) => u.accountStatus == AccountStatus.banned)
+        .length;
+    final bannedRate = a.users.isEmpty ? 0.0 : banned / a.users.length * 100;
+
+    var list = a.users;
+    if (_role != null) list = list.where((u) => u.role == _role).toList();
+    if (_query.isNotEmpty) {
+      list = list
+          .where(
+            (u) =>
+                u.name.toLowerCase().contains(_query) ||
+                u.email.toLowerCase().contains(_query) ||
+                u.uid.toLowerCase().contains(_query),
+          )
+          .toList();
+    }
+    // Flagged accounts first, then newest (stream order).
+    list = [
+      ...list.where((u) => flagged.contains(u.uid)),
+      ...list.where((u) => !flagged.contains(u.uid)),
+    ];
+    final pages = math.max(1, (list.length / _pageSize).ceil());
+    final page = math.min(_page, pages - 1);
+    final shown = list.skip(page * _pageSize).take(_pageSize).toList();
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 28),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: AdminSearchField(
+            controller: _searchCtrl,
+            hint: 'Search name, email, user ID…',
+            onChanged: (v) => setState(() {
+              _query = v.trim().toLowerCase();
+              _page = 0;
+            }),
+          ),
+        ),
+        PillRow<UserRole?>(
+          selected: _role,
+          onSelected: (r) => setState(() {
+            _role = r;
+            _page = 0;
+          }),
+          options: [
+            PillOption(null, 'All Users (${a.users.length})'),
+            PillOption(
+              UserRole.customer,
+              'Customer (${roles[UserRole.customer]})',
             ),
-            _tabs(),
-            Expanded(
-              child: StreamBuilder<List<UserModel>>(
-                stream: _firestore.streamAllUsers(),
-                builder: (context, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  var users = snap.data ?? const <UserModel>[];
-                  final banned = users
-                      .where((u) =>
-                          u.accountStatus == AccountStatus.banned)
-                      .length;
-                  if (_roleTab != 'All') {
-                    final role = UserRole.fromValue(
-                      _roleTab.toLowerCase(),
-                    );
-                    users = users.where((u) => u.role == role).toList();
-                  }
-                  if (_query.isNotEmpty) {
-                    users = users
-                        .where((u) =>
-                            u.name.toLowerCase().contains(_query) ||
-                            u.email.toLowerCase().contains(_query))
-                        .toList();
-                  }
-                  if (users.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        'No users match.',
-                        style: TextStyle(color: AppColors.gray),
-                      ),
-                    );
-                  }
-                  final shown = users.take(_visible).toList();
-                  return Column(
-                    children: [
-                      _countLine(shown.length, users.length, banned),
-                      Expanded(
-                        child: ListView.builder(
-                          padding: const EdgeInsets.all(16),
-                          itemCount: shown.length +
-                              (users.length > _visible ? 1 : 0),
-                          itemBuilder: (context, i) {
-                            if (i >= shown.length) {
-                              return Center(
-                                child: TextButton(
-                                  onPressed: () => setState(
-                                    () => _visible += _page,
-                                  ),
-                                  child: Text(
-                                    'Load more (${users.length - _visible} left)',
-                                  ),
-                                ),
-                              );
-                            }
-                            return Padding(
-                              padding:
-                                  const EdgeInsets.only(bottom: 10),
-                              child: _row(shown[i]),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
+            PillOption(UserRole.seller, 'Seller (${roles[UserRole.seller]})'),
+            PillOption(UserRole.both, 'Both (${roles[UserRole.both]})'),
+            PillOption(UserRole.admin, 'Admin (${roles[UserRole.admin]})'),
           ],
         ),
+        const SizedBox(height: 14),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: _Tile(
+                    label: 'Flagged Queue',
+                    value: '${flagged.length}',
+                    caption: 'need review',
+                    color: AppColors.coralDeep,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _Tile(
+                    label: 'Active Sellers',
+                    value: '$activeSellers',
+                    caption: 'of ${sellers.length}',
+                    color: AppColors.teal,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _Tile(
+                    label: 'Banned Rate',
+                    value: '${bannedRate.toStringAsFixed(1)}%',
+                    caption: bannedRate < 2 ? 'low risk' : 'elevated',
+                    color: AppColors.red,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (shown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(32),
+            child: Center(
+              child: Text(
+                'No users match.',
+                style: TextStyle(color: AppColors.gray),
+              ),
+            ),
+          ),
+        for (final u in shown)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: _UserCard(
+              user: u,
+              pending: AdminStats.pendingFor(a.reports, u.uid),
+              strikes: AdminStats.strikesFor(a.reports, u.uid),
+            ),
+          ),
+        if (pages > 1)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            child: _Pager(
+              page: page,
+              pages: pages,
+              onPage: (p) => setState(() => _page = p),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _Tile extends StatelessWidget {
+  const _Tile({
+    required this.label,
+    required this.value,
+    required this.caption,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final String caption;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return AdminCard(
+      radius: 12,
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
+            ),
+          ),
+          Text(
+            caption,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }
+}
 
-  Widget _tabs() {
-    const tabs = ['All', 'Customer', 'Seller', 'Both'];
-    return SizedBox(
-      height: 44,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+class _UserCard extends StatelessWidget {
+  const _UserCard({
+    required this.user,
+    required this.pending,
+    required this.strikes,
+  });
+
+  final UserModel user;
+  final int pending;
+  final int strikes;
+
+  @override
+  Widget build(BuildContext context) {
+    final me = context.read<AuthProvider>().firebaseUser?.uid;
+    final isAdmin = user.role == UserRole.admin;
+    final banned = user.accountStatus == AccountStatus.banned;
+    final statusLabel = switch (user.accountStatus) {
+      AccountStatus.active => isAdmin ? 'Active Staff' : 'Active',
+      AccountStatus.suspended =>
+        pending + strikes > 0
+            ? 'Suspended (${pending + strikes} report${pending + strikes == 1 ? '' : 's'})'
+            : 'Suspended',
+      AccountStatus.banned =>
+        strikes > 0
+            ? 'Banned ($strikes strike${strikes == 1 ? '' : 's'})'
+            : 'Banned',
+    };
+
+    return AdminCard(
+      padding: EdgeInsets.zero,
+      onTap: () => openAdminUserDetail(context, user.uid),
+      child: Column(
         children: [
-          for (final t in tabs)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                label: Text(t),
-                selected: _roleTab == t,
-                showCheckmark: false,
-                onSelected: (_) => setState(() {
-                  _roleTab = t;
-                  _visible = _page;
-                }),
-                selectedColor: AppColors.teal,
-                labelStyle: TextStyle(
-                  color: _roleTab == t ? Colors.white : AppColors.ink,
-                  fontWeight: FontWeight.w600,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 4, 12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AdminAvatar(user: user, size: 58),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            user.name.isEmpty ? 'Unnamed' : user.name,
+                            style: const TextStyle(
+                              fontSize: 16.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          SoftPill(
+                            roleLabel(user.role),
+                            color: isAdmin
+                                ? AppColors.coralDeep
+                                : user.role == UserRole.both
+                                ? AppColors.teal
+                                : AppColors.gray,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        user.email,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: AppColors.gray,
+                        ),
+                      ),
+                      if (user.trustedBadge || pending > 0) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            if (user.trustedBadge)
+                              const SoftPill(
+                                'Trusted Seller',
+                                color: AppColors.teal,
+                                icon: Icons.verified_outlined,
+                              ),
+                            if (pending > 0)
+                              SoftPill(
+                                'Flagged · $pending pending',
+                                color: AppColors.red,
+                                icon: Icons.flag_outlined,
+                              ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-                backgroundColor: AppColors.surface,
-                side: BorderSide(
-                  color:
-                      _roleTab == t ? AppColors.teal : AppColors.line,
+                if (!isAdmin && user.uid != me)
+                  _UserMenu(user: user)
+                else
+                  const SizedBox(width: 12),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            color: banned
+                ? AppColors.red.withValues(alpha: 0.07)
+                : AppColors.paper,
+            child: Row(
+              children: [
+                if (isAdmin) ...[
+                  const Icon(
+                    Icons.admin_panel_settings_outlined,
+                    size: 18,
+                    color: AppColors.coralDeep,
+                  ),
+                  const SizedBox(width: 6),
+                  const Expanded(
+                    child: Text(
+                      'Full permissions',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ] else ...[
+                  Icon(
+                    Icons.star_outline_rounded,
+                    size: 18,
+                    color: banned ? AppColors.red : AppColors.teal,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      '${user.avgRating.toStringAsFixed(1)} '
+                      '(${user.completedTransactions} deal${user.completedTransactions == 1 ? '' : 's'})',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 8),
+                Flexible(
+                  child: SoftPill(
+                    statusLabel,
+                    color: accountStatusColor(user.accountStatus),
+                    dot: true,
+                  ),
                 ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(999),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _UserMenu extends StatelessWidget {
+  const _UserMenu({required this.user});
+
+  final UserModel user;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = user.accountStatus == AccountStatus.active;
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert, color: AppColors.ink),
+      color: AppColors.surface,
+      onSelected: (v) {
+        switch (v) {
+          case 'view':
+            openAdminUserDetail(context, user.uid);
+          case 'suspend':
+            setAccountStatusFlow(context, user, AccountStatus.suspended);
+          case 'ban':
+            setAccountStatusFlow(context, user, AccountStatus.banned);
+          case 'reactivate':
+            setAccountStatusFlow(context, user, AccountStatus.active);
+        }
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem(
+          value: 'view',
+          child: _MenuRow(Icons.person_search_outlined, 'View details'),
+        ),
+        if (active) ...[
+          const PopupMenuItem(
+            value: 'suspend',
+            child: _MenuRow(
+              Icons.pause_circle_outline,
+              'Suspend user',
+              color: AppColors.amber,
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'ban',
+            child: _MenuRow(Icons.block, 'Ban account', color: AppColors.red),
+          ),
+        ] else
+          const PopupMenuItem(
+            value: 'reactivate',
+            child: _MenuRow(
+              Icons.play_circle_outline,
+              'Re-activate',
+              color: AppColors.green,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _MenuRow extends StatelessWidget {
+  const _MenuRow(this.icon, this.label, {this.color = AppColors.ink});
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(icon, size: 20, color: color),
+      const SizedBox(width: 12),
+      Text(label, style: TextStyle(color: color)),
+    ],
+  );
+}
+
+class _Pager extends StatelessWidget {
+  const _Pager({required this.page, required this.pages, required this.onPage});
+
+  final int page;
+  final int pages;
+  final ValueChanged<int> onPage;
+
+  @override
+  Widget build(BuildContext context) {
+    // 1 2 3 … N style window around the current page.
+    final nums = <int?>[];
+    for (var i = 0; i < pages; i++) {
+      if (i == 0 || i == pages - 1 || (i - page).abs() <= 1) {
+        nums.add(i);
+      } else if (nums.isNotEmpty && nums.last != null) {
+        nums.add(null);
+      }
+    }
+    return AdminCard(
+      radius: 999,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.chevron_left),
+            onPressed: page == 0 ? null : () => onPage(page - 1),
+          ),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                for (final n in nums)
+                  n == null
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 6),
+                          child: Text('…'),
+                        )
+                      : GestureDetector(
+                          onTap: () => onPage(n),
+                          child: Container(
+                            width: 36,
+                            height: 36,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: n == page
+                                  ? AppColors.coralDeep
+                                  : Colors.transparent,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Text(
+                              '${n + 1}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: n == page ? Colors.white : AppColors.ink,
+                              ),
+                            ),
+                          ),
+                        ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_right),
+            onPressed: page >= pages - 1 ? null : () => onPage(page + 1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Full-screen admin view of one account: profile, reports filed against
+/// them, deal history and moderation actions.
+class AdminUserDetailScreen extends StatefulWidget {
+  const AdminUserDetailScreen({super.key, required this.uid});
+
+  final String uid;
+
+  @override
+  State<AdminUserDetailScreen> createState() => _AdminUserDetailScreenState();
+}
+
+class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
+  bool _busy = false;
+
+  Future<void> _status(UserModel user, AccountStatus status) async {
+    setState(() => _busy = true);
+    await setAccountStatusFlow(context, user, status);
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _clearFlags(List<ReportModel> pending) async {
+    final ok = await confirmAdminAction(
+      context,
+      title:
+          'Dismiss ${pending.length} report${pending.length == 1 ? '' : 's'}?',
+      message:
+          'The reports are closed as dismissed and the flag is cleared. '
+          'The account is not changed.',
+      confirmLabel: 'Dismiss',
+      destructive: false,
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final fs = context.read<AdminProvider>().firestore;
+      await Future.wait(
+        pending.map(
+          (r) => fs.updateReportStatus(r.reportId, ReportStatus.dismissed),
+        ),
+      );
+    } catch (e) {
+      debugPrint('clearUserFlags: $e');
+      if (mounted) showAdminError(context, 'Could not dismiss. Try again.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = context.watch<AdminProvider>();
+    final me = context.watch<AuthProvider>().firebaseUser?.uid;
+    final user = a.user(widget.uid);
+    final against = a.reports
+        .where(
+          (r) =>
+              r.targetType == ReportTargetType.user && r.targetId == widget.uid,
+        )
+        .toList();
+    final pending = against
+        .where((r) => r.status == ReportStatus.pending)
+        .toList();
+    final txns = a.transactions
+        .where((t) => t.buyerId == widget.uid || t.sellerId == widget.uid)
+        .toList();
+    final canModerate =
+        user != null && user.role != UserRole.admin && user.uid != me;
+
+    return Scaffold(
+      backgroundColor: AppColors.paper,
+      appBar: AppBar(
+        backgroundColor: AppColors.paper,
+        surfaceTintColor: Colors.transparent,
+        scrolledUnderElevation: 0,
+        title: const Text(
+          'User Detail',
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+        ),
+      ),
+      body: user == null
+          ? const Center(
+              child: Text(
+                'User not found.',
+                style: TextStyle(color: AppColors.gray),
+              ),
+            )
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SoftPill(
+                    'UID: ${user.uid.length > 10 ? user.uid.substring(0, 10) : user.uid}',
+                    color: accountStatusColor(user.accountStatus),
+                    dot: true,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _profileCard(user, pending.length),
+                const SizedBox(height: 22),
+                _sectionHeader(
+                  Icons.outlined_flag,
+                  'Reports Filed Against',
+                  pending.isEmpty
+                      ? null
+                      : SoftPill(
+                          '${pending.length} open case${pending.length == 1 ? '' : 's'}',
+                          color: AppColors.red,
+                        ),
+                ),
+                const SizedBox(height: 10),
+                if (against.isEmpty)
+                  const AdminCard(
+                    child: Text(
+                      'No reports filed against this account.',
+                      style: TextStyle(color: AppColors.gray),
+                    ),
+                  ),
+                for (final r in against)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _ReportTile(report: r),
+                  ),
+                const SizedBox(height: 14),
+                _sectionHeader(
+                  Icons.receipt_long_outlined,
+                  'Transaction History',
+                  Text(
+                    '${txns.length} deal${txns.length == 1 ? '' : 's'}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                if (txns.isEmpty)
+                  const AdminCard(
+                    child: Text(
+                      'No deals yet.',
+                      style: TextStyle(color: AppColors.gray),
+                    ),
+                  ),
+                for (final t in txns.take(15))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _TxnRow(txn: t),
+                  ),
+              ],
+            ),
+      bottomNavigationBar: !canModerate
+          ? null
+          : SafeArea(
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                decoration: const BoxDecoration(
+                  color: AppColors.surface,
+                  border: Border(top: BorderSide(color: AppColors.line)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (user.accountStatus == AccountStatus.active)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () =>
+                                        _status(user, AccountStatus.suspended),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: AppColors.amber.withValues(
+                                  alpha: 0.22,
+                                ),
+                                foregroundColor: const Color(0xFF7A4A00),
+                                shape: const StadiumBorder(),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                              ),
+                              icon: const Icon(Icons.pause_circle_outline),
+                              label: const Text('Suspend User'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _status(user, AccountStatus.banned),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: AppColors.red,
+                                shape: const StadiumBorder(),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                              ),
+                              icon: const Icon(Icons.block),
+                              label: const Text('Ban Account'),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _status(user, AccountStatus.active),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppColors.green,
+                            shape: const StadiumBorder(),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          icon: const Icon(Icons.play_circle_outline),
+                          label: Text(
+                            'Re-activate (${user.accountStatus.value})',
+                          ),
+                        ),
+                      ),
+                    if (pending.isNotEmpty)
+                      TextButton.icon(
+                        onPressed: _busy ? null : () => _clearFlags(pending),
+                        style: TextButton.styleFrom(
+                          foregroundColor: AppColors.teal,
+                        ),
+                        icon: const Icon(Icons.check_circle_outline, size: 18),
+                        label: const Text('Dismiss Reports & Clear Flags'),
+                      ),
+                  ],
                 ),
               ),
             ),
+    );
+  }
+
+  Widget _profileCard(UserModel user, int pending) {
+    final region = [
+      user.address.city,
+      user.address.province,
+    ].where((s) => s.isNotEmpty).join(', ');
+    return AdminCard(
+      radius: 24,
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  AdminAvatar(user: user, size: 84, showStatus: pending == 0),
+                  if (pending > 0)
+                    Positioned(
+                      right: -2,
+                      bottom: -2,
+                      child: Container(
+                        padding: const EdgeInsets.all(5),
+                        decoration: BoxDecoration(
+                          color: AppColors.red,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: AppColors.surface,
+                            width: 2.5,
+                          ),
+                        ),
+                        child: const Icon(
+                          Icons.flag,
+                          size: 13,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          user.name.isEmpty ? 'Unnamed' : user.name,
+                          style: const TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        SoftPill(roleLabel(user.role), color: AppColors.gray),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        SoftPill(
+                          '${user.avgRating.toStringAsFixed(1)} · '
+                          '${user.completedTransactions} deals',
+                          color: const Color(0xFF9A6200),
+                          icon: Icons.star_rounded,
+                        ),
+                        if (pending > 0)
+                          SoftPill(
+                            'Flagged: $pending Pending',
+                            color: AppColors.red,
+                            icon: Icons.warning_amber_rounded,
+                          ),
+                        if (user.trustedBadge)
+                          const SoftPill(
+                            'Trusted',
+                            color: AppColors.teal,
+                            icon: Icons.verified_outlined,
+                          ),
+                        if (user.accountStatus != AccountStatus.active)
+                          SoftPill(
+                            user.accountStatus == AccountStatus.banned
+                                ? 'Banned'
+                                : 'Suspended',
+                            color: accountStatusColor(user.accountStatus),
+                            dot: true,
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+            decoration: BoxDecoration(
+              color: AppColors.paper,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Row(
+              children: [
+                _info(Icons.mail_outline, 'Contact', user.email),
+                _info(
+                  Icons.calendar_month_outlined,
+                  'Member since',
+                  user.createdAt == null
+                      ? '—'
+                      : DateFormat('MMM y').format(user.createdAt!),
+                ),
+                _info(
+                  Icons.location_on_outlined,
+                  'Region',
+                  region.isEmpty ? '—' : region,
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
-  /// "Showing X of Y · Z banned" (mockup footer counts, all live).
-  Widget _countLine(int shown, int total, int banned) {
-    return StreamBuilder<List<ReportModel>>(
-      stream: _firestore.streamReportsByStatus(ReportStatus.pending),
-      builder: (context, snap) {
-        final flagged = (snap.data ?? const <ReportModel>[])
-            .where((r) => r.targetType == ReportTargetType.user)
-            .map((r) => r.targetId)
-            .toSet()
-            .length;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-          child: Row(
+  Widget _info(IconData icon, String label, String value) => Expanded(
+    child: Column(
+      children: [
+        Icon(icon, size: 18, color: AppColors.coralDeep),
+        const SizedBox(height: 4),
+        CapsLabel(label, color: AppColors.coralDeep),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 12.5),
+        ),
+      ],
+    ),
+  );
+
+  Widget _sectionHeader(IconData icon, String title, Widget? trailing) => Row(
+    children: [
+      Icon(icon, color: AppColors.coralDeep, size: 22),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(
+          title,
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+        ),
+      ),
+      ?trailing,
+    ],
+  );
+}
+
+class _ReportTile extends StatelessWidget {
+  const _ReportTile({required this.report});
+
+  final ReportModel report;
+
+  @override
+  Widget build(BuildContext context) {
+    final a = context.watch<AdminProvider>();
+    final color = reportStatusColor(report.status);
+    return AdminCard(
+      radius: 18,
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Expanded(
-                child: Text(
-                  'Showing $shown of $total',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppColors.gray,
-                  ),
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                AdminStats.shortCode('RP', report.reportId),
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 13,
                 ),
               ),
-              if (flagged > 0)
-                Text(
-                  '$flagged flagged',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppColors.red,
-                    fontWeight: FontWeight.w700,
-                  ),
+              const Spacer(),
+              SoftPill(reportStatusLabel(report.status), color: color),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.paper,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              report.reason.isEmpty ? 'No reason given.' : '“${report.reason}”',
+              style: const TextStyle(fontStyle: FontStyle.italic, height: 1.4),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Icon(Icons.person_outline, size: 16, color: AppColors.gray),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  'By ${a.nameOf(report.reportedBy)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5),
                 ),
-              const SizedBox(width: 8),
+              ),
               Text(
-                '$banned banned',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AppColors.gray,
-                ),
+                report.createdAt == null
+                    ? 'just now'
+                    : timeago.format(report.createdAt!),
+                style: const TextStyle(fontSize: 12, color: AppColors.gray),
               ),
             ],
           ),
-        );
-      },
+        ],
+      ),
     );
   }
+}
 
-  Widget _row(UserModel user) {
-    return AppCardWrapper(
-      onTap: () => showModalBottomSheet<void>(
-        context: context,
-        backgroundColor: AppColors.surface,
-        isScrollControlled: true,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+class _TxnRow extends StatelessWidget {
+  const _TxnRow({required this.txn});
+
+  final TransactionModel txn;
+
+  @override
+  Widget build(BuildContext context) {
+    final cancelled = txn.status == TransactionStatus.cancelled;
+    return AdminCard(
+      radius: 18,
+      padding: const EdgeInsets.all(10),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              TransactionChatScreen(transactionId: txn.transactionId),
         ),
-        builder: (_) => _UserDetail(uid: user.uid),
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: AppColors.cream,
-            backgroundImage: user.photoUrl.isNotEmpty
-                ? NetworkImage(user.photoUrl)
-                : null,
-            child: user.photoUrl.isEmpty
-                ? const Icon(Icons.person_outline, color: AppColors.gray)
-                : null,
-          ),
+          TaggedThumb(url: txn.listingImage, width: 56, height: 56, radius: 10),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -264,298 +1096,63 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
               children: [
                 Row(
                   children: [
-                    Flexible(
+                    SoftPill(
+                      typeLabel(txn.type).toUpperCase(),
+                      color: typeColor(txn.type),
+                      fontSize: 10,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
                       child: Text(
-                        user.name.isEmpty ? 'Unnamed' : user.name,
+                        txn.listingTitle.isEmpty
+                            ? txn.orderNumber
+                            : txn.listingTitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ),
-                    if (user.trustedBadge) ...[
-                      const SizedBox(width: 6),
-                      const TrustedBadge(),
-                    ],
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '${user.role.value} · ★ ${user.avgRating.toStringAsFixed(1)}',
-                  style:
-                      const TextStyle(fontSize: 12, color: AppColors.gray),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Text(
+                      txn.type == ListingType.swap
+                          ? 'Item swap'
+                          : AppUtils.formatCurrency(txn.amount),
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: txn.type == ListingType.swap
+                            ? AppColors.teal
+                            : AppColors.ink,
+                        decoration: cancelled
+                            ? TextDecoration.lineThrough
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        '• ${txnStatusLabel(txn.status)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: txnStatusColor(txn.status),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          _statusPill(user.accountStatus),
+          const Icon(Icons.chevron_right, color: AppColors.gray),
         ],
       ),
-    );
-  }
-
-  Widget _statusPill(AccountStatus status) {
-    final color = switch (status) {
-      AccountStatus.active => AppColors.green,
-      AccountStatus.suspended => AppColors.amber,
-      AccountStatus.banned => AppColors.red,
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color),
-      ),
-      child: Text(
-        status.value,
-        style: TextStyle(
-          color: color,
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
-/// Full profile + history + moderation actions for one account.
-class _UserDetail extends StatefulWidget {
-  const _UserDetail({required this.uid});
-
-  final String uid;
-
-  @override
-  State<_UserDetail> createState() => _UserDetailState();
-}
-
-class _UserDetailState extends State<_UserDetail> {
-  final _firestore = FirestoreService();
-  bool _busy = false;
-
-  Future<void> _setStatus(AccountStatus status) async {
-    final label = status == AccountStatus.active
-        ? 'Re-activate'
-        : status.value;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text('$label this account?'),
-        content: status == AccountStatus.active
-            ? const Text('They will be able to sign in again.')
-            : Text(
-                'They will be signed out and blocked from signing in '
-                '(${status.value}).',
-              ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(true),
-            child: Text(label),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      await _firestore.updateAccountStatus(widget.uid, status);
-      if (mounted) Navigator.of(context).pop();
-    } catch (e) {
-      debugPrint('updateAccountStatus: $e');
-      if (mounted) {
-        setState(() => _busy = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not update. Try again.'),
-            backgroundColor: AppColors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.85,
-        builder: (context, scroll) => StreamBuilder<UserModel?>(
-          stream: _firestore.streamUser(widget.uid),
-          builder: (context, snap) {
-            final user = snap.data;
-            if (user == null) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            return ListView(
-              controller: scroll,
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-              children: [
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 30,
-                      backgroundColor: AppColors.cream,
-                      backgroundImage: user.photoUrl.isNotEmpty
-                          ? NetworkImage(user.photoUrl)
-                          : null,
-                      child: user.photoUrl.isEmpty
-                          ? const Icon(Icons.person_outline,
-                              color: AppColors.gray, size: 30)
-                          : null,
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            user.name.isEmpty ? 'Unnamed' : user.name,
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          Text(
-                            user.email,
-                            style: const TextStyle(
-                              color: AppColors.gray,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          StarRatingDisplay(
-                            rating: user.avgRating,
-                            reviewCount: user.completedTransactions,
-                            size: 14,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Role: ${user.role.value} · Status: ${user.accountStatus.value} · '
-                  'Trust: ${(user.completionRate * 100).toStringAsFixed(0)}% '
-                  '(${user.completedTransactions} deals)',
-                  style:
-                      const TextStyle(fontSize: 13, color: AppColors.gray),
-                ),
-                Text(
-                  'Member since ${AppUtils.formatDate(user.createdAt)}',
-                  style:
-                      const TextStyle(fontSize: 13, color: AppColors.gray),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Deals',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                ),
-                const SizedBox(height: 8),
-                _history(user.uid),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    if (user.accountStatus != AccountStatus.active)
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: _busy
-                              ? null
-                              : () => _setStatus(AccountStatus.active),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.green,
-                          ),
-                          child: const Text('Re-activate'),
-                        ),
-                      )
-                    else ...[
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: _busy
-                              ? null
-                              : () => _setStatus(AccountStatus.suspended),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.amber,
-                            side: const BorderSide(color: AppColors.amber),
-                          ),
-                          child: const Text('Suspend'),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: _busy
-                              ? null
-                              : () => _setStatus(AccountStatus.banned),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.red,
-                          ),
-                          child: const Text('Ban'),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _history(String uid) {
-    return FutureBuilder<List<TransactionModel>>(
-      future: Future.wait([
-        _firestore.streamBuyerTransactions(uid).first,
-        _firestore.streamSellerTransactions(uid).first,
-      ]).then((lists) => [...lists[0], ...lists[1]]),
-      builder: (context, snap) {
-        final txns = snap.data ?? const <TransactionModel>[];
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (txns.isEmpty) {
-          return const Text(
-            'No deals yet.',
-            style: TextStyle(color: AppColors.gray),
-          );
-        }
-        return Column(
-          children: [
-            for (final t in txns.take(10))
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        t.listingTitle.isEmpty ? t.orderNumber : t.listingTitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                    ),
-                    StatusPill.transaction(t.status),
-                  ],
-                ),
-              ),
-            if (txns.length > 10)
-              Text(
-                '+ ${txns.length - 10} more',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AppColors.gray,
-                ),
-              ),
-          ],
-        );
-      },
     );
   }
 }

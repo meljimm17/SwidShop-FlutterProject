@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../models/user_model.dart';
 import '../../providers/auth_provider.dart';
-import '../admin/admin_dashboard_screen.dart';
+import '../admin/admin_shell.dart';
 import '../customer/home_screen.dart';
 import '../seller/seller_shell.dart';
 import 'login_screen.dart';
@@ -12,12 +12,12 @@ import 'register_screen.dart';
 /// Returns the home screen matching [role].
 ///
 /// * seller → Seller Centre ([SellerShell], bottom nav)
-/// * admin → admin dashboard
+/// * admin → [AdminShell] (drawer + bottom nav)
 /// * customer / both / unknown → customer home feed
 Widget homeForRole(UserRole? role) {
   return switch (role) {
     UserRole.seller => const SellerShell(),
-    UserRole.admin => const AdminDashboardScreen(),
+    UserRole.admin => const AdminShell(),
     _ => const HomeScreen(),
   };
 }

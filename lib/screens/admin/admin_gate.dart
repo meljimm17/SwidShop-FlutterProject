@@ -30,11 +30,7 @@ class AdminGate extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.lock_outline,
-                size: 56,
-                color: AppColors.gray,
-              ),
+              const Icon(Icons.lock_outline, size: 56, color: AppColors.gray),
               const SizedBox(height: 16),
               const Text(
                 'Admins only.',
