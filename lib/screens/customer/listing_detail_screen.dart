@@ -11,6 +11,7 @@ import '../../models/report_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
+import '../../widgets/plan_badge.dart';
 import '../../widgets/primary_button.dart';
 import '../../widgets/secondary_button.dart';
 import '../../widgets/star_rating_display.dart';
@@ -172,7 +173,8 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
 
   void _cta(ListingModel listing) {
     if (_needsLogin()) return;
-    switch (listing.type) {      case ListingType.buyNow:
+    switch (listing.type) {
+      case ListingType.buyNow:
         Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => BuyNowScreen(listingId: listing.listingId),
@@ -476,7 +478,9 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
                 if (user != null)
-                  Row(
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    runSpacing: 4,
                     children: [
                       StarRatingDisplay(
                         rating: user.avgRating,
@@ -486,6 +490,10 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                       if (user.trustedBadge) ...[
                         const SizedBox(width: 6),
                         const TrustedBadge(),
+                      ],
+                      if (user.isVerifiedSeller) ...[
+                        const SizedBox(width: 6),
+                        PlanBadge(profile: user, compact: true),
                       ],
                     ],
                   ),
@@ -647,9 +655,32 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
           onPressed: () => _cta(listing),
         );
       case ListingType.bid:
-        return PrimaryButton(
-          label: 'Place a Bid',
-          onPressed: () => _cta(listing),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PrimaryButton(
+              label: 'Place a Bid',
+              onPressed: () => _cta(listing),
+            ),
+            // Pro add-on: instant-buy price, until bids reach it.
+            if (listing.buyItNowOpen) ...[
+              const SizedBox(height: 10),
+              SecondaryButton(
+                label:
+                    'Buy It Now — ${AppUtils.formatCurrency(listing.buyNowPrice)}',
+                icon: Icons.bolt_outlined,
+                onPressed: () {
+                  if (_needsLogin()) return;
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          BuyNowScreen(listingId: listing.listingId),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ],
         );
       case ListingType.swap:
         return SecondaryButton(

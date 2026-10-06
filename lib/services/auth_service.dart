@@ -83,38 +83,91 @@ class AuthService {
         password: password,
       );
 
-  /// One-tap demo admin for class testing ("Continue as Admin" button).
+  /// True when [username]/[password] are the admin credentials.
+  static bool isAdminLogin(String username, String password) =>
+      username.trim().toLowerCase() == AppConstants.adminUsername &&
+      password == AppConstants.adminPassword;
+
+  /// Admin login (username + password dialog on the Login screen).
   ///
-  /// Signs in the demo account, provisioning it (Auth user + `admin`-role
-  /// users doc) on first use. Delete with the button before any release.
-  Future<void> signInDemoAdmin() async {
+  /// Wrong credentials throw [AdminLoginException] before Firebase is
+  /// touched. Then signs in the admin account; an account still on the
+  /// earlier password is migrated to the new one, and a missing account is
+  /// provisioned (Auth user + `admin`-role users doc).
+  Future<void> signInAdmin(String username, String password) async {
+    if (!isAdminLogin(username, password)) {
+      throw const AdminLoginException('Incorrect admin username or password.');
+    }
+    const email = AppConstants.adminEmail;
+    User? user;
     try {
-      await _auth.signInWithEmailAndPassword(
-        email: AppConstants.demoAdminEmail,
-        password: AppConstants.demoAdminPassword,
-      );
-      return;
+      user = (await _auth.signInWithEmailAndPassword(
+        email: email,
+        password: AppConstants.adminPassword,
+      ))
+          .user;
     } on FirebaseAuthException catch (e) {
-      if (e.code != 'user-not-found' && e.code != 'invalid-credential') {
+      if (e.code != 'user-not-found' &&
+          e.code != 'invalid-credential' &&
+          e.code != 'wrong-password') {
         rethrow;
       }
     }
-    final cred = await _auth.createUserWithEmailAndPassword(
-      email: AppConstants.demoAdminEmail,
-      password: AppConstants.demoAdminPassword,
-    );
-    final user = cred.user;
-    if (user != null) {
-      await user.updateDisplayName('SwidShop Admin');
+    // Existing account on the earlier password: sign in, then migrate.
+    if (user == null) {
+      try {
+        user = (await _auth.signInWithEmailAndPassword(
+          email: email,
+          password: AppConstants.legacyAdminPassword,
+        ))
+            .user;
+        await user?.updatePassword(AppConstants.adminPassword);
+      } on FirebaseAuthException catch (e) {
+        if (e.code != 'user-not-found' &&
+            e.code != 'invalid-credential' &&
+            e.code != 'wrong-password') {
+          rethrow;
+        }
+      }
+    }
+    // No account yet: provision it.
+    if (user == null) {
+      try {
+        user = (await _auth.createUserWithEmailAndPassword(
+          email: email,
+          password: AppConstants.adminPassword,
+        ))
+            .user;
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'email-already-in-use') {
+          throw const AdminLoginException(
+            'The admin account exists with a different password. Reset it '
+            'in the Firebase console.',
+          );
+        }
+        rethrow;
+      }
+      if (user != null) await user.updateDisplayName('SwidShop Admin');
+    }
+    if (user == null) {
+      throw const AdminLoginException('Admin sign-in failed. Try again.');
+    }
+    // Make sure the admin profile exists with the admin role.
+    final profile = await _firestore.getUser(user.uid);
+    if (profile == null) {
       await _firestore.createUserProfile(
         UserModel(
           uid: user.uid,
           name: 'SwidShop Admin',
-          email: AppConstants.demoAdminEmail,
+          email: email,
           role: UserRole.admin,
           createdAt: DateTime.now(),
         ),
       );
+    } else if (profile.role != UserRole.admin) {
+      await _firestore.updateUserProfile(user.uid, {
+        'role': UserRole.admin.value,
+      });
     }
   }
 
@@ -193,9 +246,12 @@ class AuthService {
   /// Translates auth errors into friendly messages.
   static String messageFor(Object error) {
     debugPrint('Auth error: $error');
+    if (error is AdminLoginException) return error.message;
     if (error is FirebaseAuthException) {
       switch (error.code) {
         case 'invalid-email':
+        case 'missing-email':
+        case 'channel-error':
           return 'That email address is not valid.';
         case 'user-disabled':
           return 'This account has been disabled.';
@@ -236,4 +292,14 @@ class AuthService {
     }
     return 'Something went wrong. Please try again.';
   }
+}
+
+/// Wrong admin username/password, or an admin account problem.
+class AdminLoginException implements Exception {
+  const AdminLoginException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }

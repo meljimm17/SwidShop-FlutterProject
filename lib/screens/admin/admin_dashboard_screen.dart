@@ -9,6 +9,7 @@ import '../../models/user_model.dart';
 import '../../providers/admin_provider.dart';
 import '../../providers/auth_provider.dart';
 import 'admin_charts.dart';
+import 'admin_fees_screen.dart';
 import 'admin_shell.dart';
 import 'admin_users_screen.dart';
 import 'admin_widgets.dart';
@@ -112,9 +113,8 @@ class AdminDashboardScreen extends StatelessWidget {
                       spacing: 4,
                       runSpacing: 4,
                       children: [
-                        _MiniChip('${roles[UserRole.customer]} buyers'),
-                        _MiniChip('${roles[UserRole.seller]} sellers'),
-                        _MiniChip('${roles[UserRole.both]} dual'),
+                        _MiniChip('${roles[UserRole.customer]} customers'),
+                        _MiniChip('${roles[UserRole.both]} customer + seller'),
                       ],
                     ),
                   ),
@@ -259,6 +259,8 @@ class AdminDashboardScreen extends StatelessWidget {
             trailing: SoftPill('Total ${active.length}', color: AppColors.ink),
             child: TypeDonut(counts: types),
           ),
+          const SizedBox(height: 12),
+          _RevenueCard(admin: a),
           const SizedBox(height: 12),
           _ChartCard(
             title: 'User Growth',
@@ -453,6 +455,172 @@ class _DotRow extends StatelessWidget {
       ],
     ),
   );
+}
+
+/// Demo revenue section (all figures demo-mode, labeled as such).
+class _RevenueCard extends StatelessWidget {
+  const _RevenueCard({required this.admin});
+
+  final AdminProvider admin;
+
+  @override
+  Widget build(BuildContext context) {
+    final payments = admin.payments;
+    final byStream = RevenueStats.byStream(payments, admin.partnerAds);
+    final total = RevenueStats.total(byStream);
+    final fees = RevenueStats.fees(admin.transactions);
+    final plans = RevenueStats.paidPlans(admin.users);
+    final boosted = RevenueStats.activeBoosts(admin.users);
+    final weekly = RevenueStats.weekly(payments);
+    final recent = payments.take(5).toList();
+
+    return _ChartCard(
+      title: 'Revenue',
+      subtitle: 'Fees, plans, boosts, featured, photo packs & ads',
+      trailing: TextButton(
+        onPressed: () => openAdminFees(context),
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.coralDeep,
+        ),
+        child: const Text('Fees ›'),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            AppUtils.formatCurrency(total),
+            style: const TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const Text(
+            'Total revenue',
+            style: TextStyle(fontSize: 12, color: AppColors.gray),
+          ),
+          const SizedBox(height: 10),
+          for (final k in RevenueStats.streams)
+            _streamRow(RevenueStats.labels[k] ?? k, byStream[k] ?? 0, total),
+          const SizedBox(height: 14),
+          const Text(
+            'Weekly revenue (payments)',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          WeeklyRevenueBars(data: weekly),
+          const Divider(height: 24),
+          _kv('Fees Collected', AppUtils.formatCurrency(fees.collected)),
+          _kv('Fees Outstanding', AppUtils.formatCurrency(fees.outstanding)),
+          if (fees.overdue > 0)
+            _kv('  of which overdue', AppUtils.formatCurrency(fees.overdue)),
+          _kv('Active boosts', '$boosted shop${boosted == 1 ? '' : 's'}'),
+          _kv('Active Plus / Pro sellers', '${plans.plus} / ${plans.pro}'),
+          const SizedBox(height: 10),
+          const Text(
+            'Recent payments',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+          ),
+          const SizedBox(height: 4),
+          if (recent.isEmpty)
+            const Text(
+              'No payments yet.',
+              style: TextStyle(fontSize: 12.5, color: AppColors.gray),
+            ),
+          for (final p in recent)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${admin.nameOf(p.userId)} · '
+                      '${p.label.isEmpty ? (RevenueStats.labels[p.type] ?? p.type) : p.label}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    AppUtils.formatCurrency(p.amount),
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _streamRow(String label, double value, double total) {
+    final frac = total <= 0 ? 0.0 : value / total;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 108,
+            child: Text(label, style: const TextStyle(fontSize: 12)),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 8,
+                backgroundColor: AppColors.line,
+                valueColor: const AlwaysStoppedAnimation<Color>(
+                  AppColors.teal,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 84,
+            child: Text(
+              AppUtils.formatCurrency(value),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _kv(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              k,
+              style:
+                  const TextStyle(fontSize: 12.5, color: AppColors.gray),
+            ),
+          ),
+          Text(
+            v,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ChartCard extends StatelessWidget {

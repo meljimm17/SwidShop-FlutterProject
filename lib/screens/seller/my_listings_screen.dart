@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/listing_model.dart';
 import '../../models/transaction_model.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/seller_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
 import '../shared/transaction_chat_screen.dart';
+import 'auction_time_sheet.dart';
+import 'boost_sheet.dart';
 import 'monitor_bidding_screen.dart';
+import 'plans_screen.dart';
 import 'post_listing_screen.dart';
 import 'swap_offers_screen.dart';
 
@@ -39,6 +44,67 @@ class _MyListingsScreenState extends State<MyListingsScreen> {
   // ---------------------------------------------------------------------------
   // Actions
   // ---------------------------------------------------------------------------
+
+  bool _isPro() =>
+      context.read<AuthProvider>().profile?.isPro ?? false;
+
+  /// Paid feature slot (Step 5): anyone can buy; extends an active one.
+  Future<void> _feature(BuildContext context, ListingModel l) =>
+      featureListing(context, listingId: l.listingId, title: l.title);
+
+  /// Bump allowed once per [AppConstants.bumpCooldown] per listing.
+  bool _bumpCoolingDown(ListingModel l) {
+    final last = l.bumpedAt;
+    return last != null &&
+        DateTime.now().difference(last) < AppConstants.bumpCooldown;
+  }
+
+  Future<void> _bump(BuildContext context, ListingModel l) async {
+    if (!_isPro()) {
+      await showUpgradePrompt(context, feature: 'Bump Listing');
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await FirestoreService().bumpListing(l);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Bumped to the top of the feed!')),
+      );
+    } catch (e) {
+      debugPrint('bump: $e');
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(e is StateError ? e.message : 'Could not bump. Try again.'),
+          backgroundColor: AppColors.red,
+        ),
+      );
+    }
+  }
+
+  /// Highlight = coral border + Hot tag (Pro perk, no charge).
+  Future<void> _highlight(BuildContext context, ListingModel l) async {
+    if (!_isPro()) {
+      await showUpgradePrompt(context, feature: 'Highlighted Listing');
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final until = await FirestoreService().highlightListing(l.listingId);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Highlighted until ${AppUtils.formatDate(until)}!'),
+        ),
+      );
+    } catch (e) {
+      debugPrint('highlight: $e');
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Could not highlight. Try again.'),
+          backgroundColor: AppColors.red,
+        ),
+      );
+    }
+  }
 
   Future<void> _delist(ListingModel l) async {
     final ok = await showDialog<bool>(
@@ -83,6 +149,7 @@ class _MyListingsScreenState extends State<MyListingsScreen> {
   Future<void> _manage(ListingModel l, SellerProvider s) async {
     final locked = s.isLocked(l);
     final offers = s.offerCountFor(l.listingId);
+    final pro = _isPro();
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.surface,
@@ -143,6 +210,79 @@ class _MyListingsScreenState extends State<MyListingsScreen> {
                 _push(PostListingScreen(existing: l));
               },
             ),
+            if (l.status == ListingStatus.active &&
+                l.type == ListingType.bid &&
+                (l.auctionEndAt?.isAfter(DateTime.now()) ?? false))
+              ListTile(
+                leading: const Icon(
+                  Icons.more_time_rounded,
+                  color: AppColors.amber,
+                ),
+                title: const Text('Change end time'),
+                subtitle: Text(
+                  'Ends ${AppUtils.formatDateTime(l.auctionEndAt)} — make it '
+                  'shorter or longer, even with bids',
+                ),
+                onTap: () {
+                  Navigator.of(sheet).pop();
+                  showChangeAuctionEndSheet(context, l);
+                },
+              ),
+            if (l.status == ListingStatus.active) ...[
+              ListTile(
+                leading: const Icon(
+                  Icons.star_outline,
+                  color: AppColors.amber,
+                ),
+                title: const Text('Feature this listing'),
+                subtitle: Text(
+                  l.isFeatured
+                      ? 'Featured until ${AppUtils.formatDate(l.featuredUntil)} — buy more to extend'
+                      : '${AppConstants.featuredDays}-day Sponsored slot + Featured tag · ${AppUtils.formatCurrency(AppConstants.featuredPrice)}',
+                ),
+                onTap: () {
+                  Navigator.of(sheet).pop();
+                  _feature(context, l);
+                },
+              ),
+              ListTile(
+                enabled: !(pro && _bumpCoolingDown(l)),
+                leading: const Icon(
+                  Icons.arrow_upward_outlined,
+                  color: AppColors.teal,
+                ),
+                title: const Text('Bump listing'),
+                subtitle: Text(
+                  !pro
+                      ? 'Back to the top of the feed, daily (Pro)'
+                      : _bumpCoolingDown(l)
+                          ? 'Already bumped — available again tomorrow'
+                          : 'Back to the top of the feed (once a day)',
+                ),
+                trailing: pro ? null : const LockIcon(),
+                onTap: () {
+                  Navigator.of(sheet).pop();
+                  _bump(context, l);
+                },
+              ),
+              ListTile(
+                leading: const Icon(
+                  Icons.highlight_outlined,
+                  color: AppColors.coral,
+                ),
+                title: const Text('Highlight listing'),
+                subtitle: Text(
+                  l.isHighlighted
+                      ? 'Highlighted until ${AppUtils.formatDate(l.highlightUntil)} (coral border + Hot tag)'
+                      : 'Coral border + Hot tag for ${AppConstants.highlightDays} days (Pro)',
+                ),
+                trailing: pro ? null : const LockIcon(),
+                onTap: () {
+                  Navigator.of(sheet).pop();
+                  _highlight(context, l);
+                },
+              ),
+            ],
             ListTile(
               enabled: !locked,
               leading: Icon(

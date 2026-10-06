@@ -40,6 +40,11 @@ class TransactionModel {
     this.swapItemTitle = '',
     this.status = TransactionStatus.pending,
     this.createdAt,
+    this.feeRate = 0,
+    this.feeAmount = 0,
+    this.feeStatus = 'none',
+    this.feeDueAt,
+    this.paidAt,
   });
 
   final String transactionId;
@@ -61,6 +66,24 @@ class TransactionModel {
 
   final TransactionStatus status;
   final DateTime? createdAt;
+
+  /// Platform commission (demo monetization): the seller plan rate stamped
+  /// at deal time, the peso amount, and its payment state.
+  /// feeStatus: 'none' (swaps / legacy) | 'unpaid' | 'paid' | 'void'.
+  final double feeRate;
+  final double feeAmount;
+  final String feeStatus;
+  final DateTime? feeDueAt;
+  final DateTime? paidAt;
+
+  /// True when this deal carries an outstanding platform fee.
+  bool get feeUnpaid => feeStatus == 'unpaid';
+
+  /// True when the fee is unpaid AND past its due date.
+  bool get feeOverdue =>
+      feeStatus == 'unpaid' &&
+      feeDueAt != null &&
+      !feeDueAt!.isAfter(DateTime.now());
 
   /// Short human order number, e.g. `SW-4F2A9C`.
   String get orderNumber {
@@ -86,6 +109,11 @@ class TransactionModel {
       swapItemTitle: map['swapItemTitle'] as String? ?? '',
       status: TransactionStatus.fromValue(map['status'] as String?),
       createdAt: (map['createdAt'] as Timestamp?)?.toDate(),
+      feeRate: (map['feeRate'] as num?)?.toDouble() ?? 0,
+      feeAmount: (map['feeAmount'] as num?)?.toDouble() ?? 0,
+      feeStatus: map['feeStatus'] as String? ?? 'none',
+      feeDueAt: (map['feeDueAt'] as Timestamp?)?.toDate(),
+      paidAt: (map['paidAt'] as Timestamp?)?.toDate(),
     );
   }
 
@@ -102,6 +130,11 @@ class TransactionModel {
         'swapItemTitle': swapItemTitle,
         'status': status.value,
         'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
+        'feeRate': feeRate,
+        'feeAmount': feeAmount,
+        'feeStatus': feeStatus,
+        'feeDueAt': feeDueAt != null ? Timestamp.fromDate(feeDueAt!) : null,
+        'paidAt': paidAt != null ? Timestamp.fromDate(paidAt!) : null,
       };
 
   TransactionModel copyWith({
@@ -117,6 +150,11 @@ class TransactionModel {
     String? swapItemTitle,
     TransactionStatus? status,
     DateTime? createdAt,
+    double? feeRate,
+    double? feeAmount,
+    String? feeStatus,
+    DateTime? feeDueAt,
+    DateTime? paidAt,
   }) =>
       TransactionModel(
         transactionId: transactionId ?? this.transactionId,
@@ -131,5 +169,10 @@ class TransactionModel {
         swapItemTitle: swapItemTitle ?? this.swapItemTitle,
         status: status ?? this.status,
         createdAt: createdAt ?? this.createdAt,
+        feeRate: feeRate ?? this.feeRate,
+        feeAmount: feeAmount ?? this.feeAmount,
+        feeStatus: feeStatus ?? this.feeStatus,
+        feeDueAt: feeDueAt ?? this.feeDueAt,
+        paidAt: paidAt ?? this.paidAt,
       );
 }

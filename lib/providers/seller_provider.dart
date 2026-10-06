@@ -158,6 +158,9 @@ class SellerProvider extends ChangeNotifier {
   List<ListingModel> _listings = const [];
   List<SwapOfferModel> _offers = const [];
   List<TransactionModel> _txns = const [];
+
+  /// Deals where this user is the BUYER (role 'both'); Messages tab only.
+  List<TransactionModel> _buying = const [];
   bool _listingsLoaded = false;
   bool _offersLoaded = false;
   bool _txnsLoaded = false;
@@ -170,6 +173,7 @@ class SellerProvider extends ChangeNotifier {
   List<ListingModel> get listings => _listings;
   List<SwapOfferModel> get offers => _offers;
   List<TransactionModel> get transactions => _txns;
+  List<TransactionModel> get buyingTransactions => _buying;
 
   /// Called by the proxy provider whenever auth changes.
   void setUser(String? uid) {
@@ -214,6 +218,14 @@ class SellerProvider extends ChangeNotifier {
           _txnsLoaded = true;
           notifyListeners();
         }, onError: onError),
+      )
+      // Buying side is optional context for Messages: an error here must
+      // not blank the seller data.
+      ..add(
+        _firestore.streamBuyerTransactions(uid).listen((v) {
+          _buying = v;
+          notifyListeners();
+        }, onError: (Object e) => debugPrint('SellerProvider buying: $e')),
       );
   }
 
@@ -289,6 +301,7 @@ class SellerProvider extends ChangeNotifier {
     _listings = const [];
     _offers = const [];
     _txns = const [];
+    _buying = const [];
     _listingsLoaded = _offersLoaded = _txnsLoaded = false;
     _error = null;
     _started = false;

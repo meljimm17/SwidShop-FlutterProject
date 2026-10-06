@@ -15,12 +15,14 @@ import '../../widgets/star_rating_display.dart';
 import '../../widgets/top_app_bar.dart';
 import '../../widgets/trusted_badge.dart';
 import '../auth/role_home.dart';
+import '../seller/seller_shell.dart';
 import '../shared/rate_sheet.dart';
 import 'activity_screen.dart';
 import 'buyer_messages_screen.dart';
 import 'edit_profile_screen.dart';
 import 'favorites_screen.dart';
 import 'my_ratings_screen.dart';
+import 'role_request_sheet.dart';
 import 'trade_closet_screen.dart';
 
 /// The user's own profile (Phase 3.11): real stats, tiles, edit, logout.
@@ -76,7 +78,7 @@ class ProfileScreen extends StatelessWidget {
                     children: [
                       _row(Icons.mail_outline, 'Email', profile.email),
                       const Divider(),
-                      _row(Icons.badge_outlined, 'Role', profile.role.value),
+                      _row(Icons.badge_outlined, 'Role', profile.role.label),
                       const Divider(),
                       _row(
                         Icons.location_on_outlined,
@@ -96,6 +98,24 @@ class ProfileScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 16),
+                // Sellers reach their shop from here too (not when this
+                // Profile is already the Seller Centre's own tab).
+                if (profile.role.canSell && !embedded)
+                  _tile(
+                    context,
+                    Icons.storefront_outlined,
+                    'Seller Centre',
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const SellerShell()),
+                    ),
+                  ),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 10),
+                  child: AppCardWrapper(
+                    padding: EdgeInsets.symmetric(horizontal: 16),
+                    child: RoleRequestTile(),
+                  ),
+                ),
                 _tile(
                   context,
                   Icons.chat_bubble_outline,

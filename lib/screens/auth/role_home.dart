@@ -5,18 +5,17 @@ import '../../models/user_model.dart';
 import '../../providers/auth_provider.dart';
 import '../admin/admin_shell.dart';
 import '../customer/home_screen.dart';
-import '../seller/seller_shell.dart';
 import 'login_screen.dart';
 import 'register_screen.dart';
 
 /// Returns the home screen matching [role].
 ///
-/// * seller → Seller Centre ([SellerShell], bottom nav)
-/// * admin → [AdminShell] (drawer + bottom nav)
-/// * customer / both / unknown → customer home feed
+/// * admin → [AdminShell] (side bar)
+/// * customer / both (Customer + Seller) → the same marketplace
+///   [HomeScreen]. Customer + Seller accounts open the Seller Centre from
+///   its store icon. (The old seller-only role reads as both.)
 Widget homeForRole(UserRole? role) {
   return switch (role) {
-    UserRole.seller => const SellerShell(),
     UserRole.admin => const AdminShell(),
     _ => const HomeScreen(),
   };

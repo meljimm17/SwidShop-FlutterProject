@@ -6,7 +6,8 @@
  *                    the "Trusted" badge.
  *  2. auction-close: close expired auctions and create the winning transaction.
  */
-const { onCall, onSchedule, HttpsError } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { logger } = require("firebase-functions");
 const admin = require("firebase-admin");
@@ -103,9 +104,230 @@ exports.onTransactionWritten = onDocumentWritten(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Demo monetization — WRITTEN BUT NOT DEPLOYED YET (professor's rule).
+// The app runs the same logic client-side (FirestoreService.
+// runSellerMaintenance when a seller opens the Seller Centre), so the demo
+// works without these. Keep the numbers in sync with lib/core/constants.dart.
+// ---------------------------------------------------------------------------
+
+const FEE_RATES = { free: 0.05, plus: 0.04, pro: 0.03 };
+const FEE_DUE_DAYS = 7;
+const FEE_REMINDER_DAYS = [1, 3, 6];
+const DAY_MS = 86400000;
+
+/** Plan that applies now: a lapsed (or unknown) plan counts as free. */
+function effectivePlan(user) {
+  const plan = (user && user.plan) || "free";
+  if (plan !== "plus" && plan !== "pro") return "free";
+  const until = user.planUntil && user.planUntil.toDate
+    ? user.planUntil.toDate()
+    : null;
+  if (until && until.getTime() <= Date.now()) return "free";
+  return plan;
+}
+
+/** Fee in pesos rounded to centavos (same as Fees.amountFor in Dart). */
+function feeFor(amount, rate) {
+  return Math.round(amount * rate * 100) / 100;
+}
+
+/** In-app notification doc (same shape as NotificationModel). */
+async function notify(uid, message, relatedId) {
+  await db
+    .collection("notifications")
+    .doc(uid)
+    .collection("items")
+    .add({
+      type: "transactionUpdate",
+      message,
+      relatedId,
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+}
+
+/** Push to the seller's device (token saved privately by the app). */
+async function push(uid, title, body, relatedId) {
+  try {
+    const priv = await db
+      .collection("users")
+      .doc(uid)
+      .collection("private")
+      .doc("details")
+      .get();
+    const token = priv.exists ? priv.get("fcmToken") : null;
+    if (!token) return;
+    await admin.messaging().send({
+      token,
+      notification: { title, body },
+      data: { relatedId },
+      android: { priority: "high" },
+    });
+  } catch (e) {
+    // Stale/invalid token or no Play services: in-app notice still exists.
+    logger.warn("push failed", { uid, error: String(e) });
+  }
+}
+
+/** Sets `hidden` on a seller's ACTIVE listings (batched). */
+async function setListingsHidden(sellerId, hidden) {
+  const mine = await db
+    .collection("listings")
+    .where("sellerId", "==", sellerId)
+    .where("status", "==", "active")
+    .get();
+  const docs = mine.docs.filter((d) => (d.get("hidden") === true) !== hidden);
+  for (let i = 0; i < docs.length; i += 400) {
+    const batch = db.batch();
+    docs.slice(i, i + 400).forEach((d) => batch.update(d.ref, { hidden }));
+    await batch.commit();
+  }
+}
+
+/**
+ * Daily: push + in-app reminder for each unpaid fee on days 1/3/6 after
+ * the deal, and every day once overdue. Then applies the automatic fee
+ * hold (overdue → on_hold + hide listings) and lifts it when nothing is
+ * overdue any more. Never touches suspended/banned accounts, and never
+ * lifts an admin's manual hold (holdManual).
+ */
+exports.feeReminders = onSchedule(
+  { schedule: "every day 09:00", timeZone: "Asia/Manila" },
+  async () => {
+    const now = Date.now();
+    const unpaid = await db
+      .collection("transactions")
+      .where("feeStatus", "==", "unpaid")
+      .get();
+    logger.info(`feeReminders: ${unpaid.size} unpaid fee(s) to check`);
+
+    const overdueSellers = new Set();
+    for (const doc of unpaid.docs) {
+      const t = doc.data();
+      if (t.status === "cancelled" || !t.sellerId) continue;
+      const created = t.createdAt && t.createdAt.toDate
+        ? t.createdAt.toDate()
+        : null;
+      const due = t.feeDueAt && t.feeDueAt.toDate ? t.feeDueAt.toDate() : null;
+      if (!created) continue;
+      const ageDays = Math.floor((now - created.getTime()) / DAY_MS);
+      const overdue = !!due && due.getTime() <= now;
+      if (overdue) overdueSellers.add(t.sellerId);
+      if (!overdue && !FEE_REMINDER_DAYS.includes(ageDays)) continue;
+
+      const title = t.listingTitle ? `"${t.listingTitle}"` : "a deal";
+      const amount = `₱${Number(t.feeAmount || 0).toFixed(2)}`;
+      const dueText = due
+        ? due.toLocaleDateString("en-PH", {
+          month: "short",
+          day: "numeric",
+          timeZone: "Asia/Manila",
+        })
+        : "soon";
+      const message = overdue
+        ? `Platform fee ${amount} for ${title} is OVERDUE — pay now to ` +
+          "lift the hold on your shop."
+        : `Reminder: platform fee ${amount} for ${title} is due ${dueText}.`;
+      const relatedId = `transaction:${doc.id}`;
+      await notify(t.sellerId, message, relatedId);
+      await push(
+        t.sellerId,
+        overdue ? "Platform fee overdue" : "Platform fee reminder",
+        message,
+        relatedId
+      );
+    }
+
+    // Apply holds.
+    for (const sellerId of overdueSellers) {
+      const ref = db.collection("users").doc(sellerId);
+      const snap = await ref.get();
+      if (!snap.exists) continue;
+      const status = snap.get("accountStatus") || "active";
+      if (status !== "active") continue; // never replace suspended/banned
+      await ref.update({ accountStatus: "on_hold" });
+      await setListingsHidden(sellerId, true);
+    }
+
+    // Lift automatic holds with nothing overdue left.
+    const held = await db
+      .collection("users")
+      .where("accountStatus", "==", "on_hold")
+      .get();
+    for (const doc of held.docs) {
+      if (doc.get("holdManual") === true) continue;
+      if (overdueSellers.has(doc.id)) continue;
+      await doc.ref.update({ accountStatus: "active" });
+      await setListingsHidden(doc.id, false);
+    }
+    logger.info(
+      `feeReminders: done (${overdueSellers.size} seller(s) overdue)`
+    );
+    return null;
+  }
+);
+
+/**
+ * Hourly: clear expired boosts / featured slots / highlights, reset lapsed
+ * plans to free, and switch ended partner ads off.
+ */
+exports.expirePerks = onSchedule("every hour", async () => {
+  const now = admin.firestore.Timestamp.now();
+  let cleared = 0;
+
+  const boosted = await db
+    .collection("users")
+    .where("boostedUntil", "<=", now)
+    .get();
+  for (const doc of boosted.docs) {
+    await doc.ref.update({ boostedUntil: null });
+    cleared++;
+  }
+
+  for (const field of ["featuredUntil", "highlightUntil"]) {
+    const ended = await db
+      .collection("listings")
+      .where(field, "<=", now)
+      .get();
+    for (const doc of ended.docs) {
+      await doc.ref.update({ [field]: null });
+      cleared++;
+    }
+  }
+
+  const lapsed = await db
+    .collection("users")
+    .where("planUntil", "<=", now)
+    .get();
+  for (const doc of lapsed.docs) {
+    if ((doc.get("plan") || "free") !== "free") {
+      await doc.ref.update({ plan: "free", planUntil: null });
+      cleared++;
+    }
+  }
+
+  const ads = await db
+    .collection("partnerAds")
+    .where("active", "==", true)
+    .get();
+  for (const doc of ads.docs) {
+    const end = doc.get("endsAt");
+    if (end && end.toMillis() <= now.toMillis()) {
+      await doc.ref.update({ active: false });
+      cleared++;
+    }
+  }
+
+  logger.info(`expirePerks: cleared ${cleared} perk(s)`);
+  return null;
+});
+
 /**
  * Scheduled: close auctions whose `auctionEndAt` has passed and create a
- * winning transaction for the highest bid (if any).
+ * winning transaction for the highest bid (if any), with the platform fee
+ * stamped at the seller's plan rate (needs the listings type+status+
+ * auctionEndAt composite index in firestore.indexes.json).
  */
 exports.closeAuctions = onSchedule("every 15 minutes", async () => {
   const now = admin.firestore.Timestamp.now();
@@ -131,9 +353,13 @@ exports.closeAuctions = onSchedule("every 15 minutes", async () => {
     // and the other is a no-op (no duplicate transactions).
     const txnRef = db.collection("transactions").doc(`auction_${doc.id}`);
     await db.runTransaction(async (tx) => {
+      // ALL reads before any write (Firestore transaction rule).
       const fresh = await tx.get(doc.ref);
       if (!fresh.exists || fresh.get("status") !== "active") return;
       const listing = fresh.data();
+      const sellerDoc = listing.sellerId
+        ? await tx.get(db.collection("users").doc(listing.sellerId))
+        : null;
 
       const winningBid = bidsSnap.empty ? null : bidsSnap.docs[0].data();
       const reserve = listing.reservePrice;
@@ -143,6 +369,10 @@ exports.closeAuctions = onSchedule("every 15 minutes", async () => {
         return;
       }
 
+      const plan = effectivePlan(
+        sellerDoc && sellerDoc.exists ? sellerDoc.data() : null
+      );
+      const feeRate = FEE_RATES[plan] ?? FEE_RATES.free;
       tx.update(doc.ref, {
         status: "sold",
         currentHighestBid: winningBid.amount,
@@ -157,9 +387,18 @@ exports.closeAuctions = onSchedule("every 15 minutes", async () => {
         listingTitle: listing.title || "",
         listingImage: (listing.images && listing.images[0]) || "",
         offerId: "",
+        swapItemTitle: "",
         status: "pending",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        feeRate,
+        feeAmount: feeFor(winningBid.amount, feeRate),
+        feeStatus: "unpaid",
+        feeDueAt: admin.firestore.Timestamp.fromMillis(
+          Date.now() + FEE_DUE_DAYS * DAY_MS
+        ),
+        paidAt: null,
       });
     });
   }
+  return null;
 });

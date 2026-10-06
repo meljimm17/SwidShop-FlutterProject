@@ -8,9 +8,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
 import 'package:swidshop/models/category_model.dart';
+import 'package:swidshop/models/payment_model.dart';
 import 'package:swidshop/models/listing_model.dart';
+import 'package:swidshop/models/partner_ad_model.dart';
 import 'package:swidshop/models/rating_model.dart';
 import 'package:swidshop/models/report_model.dart';
+import 'package:swidshop/models/role_request_model.dart';
 import 'package:swidshop/models/transaction_model.dart';
 import 'package:swidshop/models/user_model.dart';
 import 'package:swidshop/providers/admin_provider.dart';
@@ -63,6 +66,25 @@ class _FakeFirestore implements FirestoreService {
 
   @override
   Stream<List<ReportModel>> streamAllReports() => Stream.value(reports);
+
+  @override
+  Stream<List<PaymentModel>> streamAllPayments() =>
+      Stream.value(const []);
+
+  @override
+  Stream<List<PartnerAdModel>> streamAllPartnerAds() =>
+      Stream.value(const []);
+
+  @override
+  Stream<List<RoleRequestModel>> streamAllRoleRequests() => Stream.value([
+    RoleRequestModel(
+      uid: 'u1',
+      currentRole: UserRole.customer,
+      requestedRole: UserRole.both,
+      reason: 'I also want to buy and bid on items',
+      createdAt: DateTime(2026, 10, 4),
+    ),
+  ]);
 
   @override
   Stream<List<CategoryModel>> streamCategories() => Stream.value(const [
@@ -178,7 +200,7 @@ void main() {
     test('userGrowth is cumulative per month', () {
       final growth = AdminStats.userGrowth([
         _user('a', 'A', UserRole.customer, createdAt: DateTime(2026, 5, 3)),
-        _user('b', 'B', UserRole.seller, createdAt: DateTime(2026, 9, 30)),
+        _user('b', 'B', UserRole.both, createdAt: DateTime(2026, 9, 30)),
         _user('c', 'C', UserRole.both, createdAt: DateTime(2026, 10, 1)),
       ], now: now);
       expect(growth.first.month, DateTime(2026, 5));
@@ -253,14 +275,14 @@ void main() {
 
     test('topSellers puts trusted first and skips inactive accounts', () {
       final top = AdminStats.topSellers([
-        _user('a', 'A', UserRole.seller, deals: 3, rating: 5),
+        _user('a', 'A', UserRole.both, deals: 3, rating: 5),
         _user('b', 'B', UserRole.both, deals: 1, rating: 3, trusted: true),
         _user('c', 'C', UserRole.customer, deals: 9, rating: 5),
-        _user('d', 'D', UserRole.seller, deals: 0),
+        _user('d', 'D', UserRole.both, deals: 0),
         _user(
           'e',
           'E',
-          UserRole.seller,
+          UserRole.both,
           deals: 5,
           rating: 5,
           status: AccountStatus.banned,
@@ -293,7 +315,7 @@ void main() {
       _user(
         'u1',
         'Mark Santos the Long Named Seller',
-        UserRole.seller,
+        UserRole.both,
         createdAt: now.subtract(const Duration(days: 90)),
         deals: 19,
         rating: 3.2,
@@ -439,11 +461,18 @@ void main() {
     await tester.scrollUntilVisible(find.text('Top / Trusted Sellers'), 200);
     await tester.pump(const Duration(milliseconds: 400));
 
+    // Navigation is the side bar only (no bottom bar).
     Future<void> tab(String label) async {
+      await tester.tap(find.byTooltip('Menu'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(find.text(label).last);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
     }
+
+    // No bottom navigation bar: its "Admin" tab label is gone.
+    expect(find.text('Admin'), findsNothing);
 
     await tab('Users');
     expect(find.text('Flagged Queue'), findsOneWidget);
@@ -453,7 +482,7 @@ void main() {
     expect(find.text('INSPECT'), findsOneWidget);
     expect(find.textContaining('Swap (ISO'), findsOneWidget);
 
-    await tab('Orders');
+    await tab('Transactions');
     expect(find.text('DISPUTED'), findsOneWidget);
     await tester.drag(find.text('DISPUTED'), const Offset(0, -500));
     await tester.pump(const Duration(milliseconds: 400));
@@ -468,14 +497,7 @@ void main() {
     expect(find.text('Remove Listing'), findsOneWidget);
 
     // Drawer → Ratings & Reviews.
-    Future<void> drawer(String label) async {
-      await tester.tap(find.byTooltip('Menu'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text(label).last);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-    }
+    Future<void> drawer(String label) => tab(label);
 
     await drawer('Ratings & Reviews');
     await tester.pump(const Duration(milliseconds: 100));
@@ -484,6 +506,32 @@ void main() {
 
     await drawer('Categories');
     expect(find.text('Vintage Graphic Tees'), findsOneWidget);
+
+    // Role Requests: pending request with Approve / Decline.
+    await drawer('Role Requests');
+    expect(find.text('1 waiting for a decision'), findsOneWidget);
+    expect(find.text('Customer + Seller'), findsOneWidget);
+    expect(find.text('Approve'), findsOneWidget);
+    expect(find.text('Decline'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    // Pushed admin routes must carry the shell's AdminProvider
+    // (regression: "Could not find Provider<AdminProvider>").
+    await drawer('Fees');
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Unpaid ('), findsOneWidget);
+    Navigator.of(tester.element(find.textContaining('Unpaid ('))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await drawer('Manage Ads');
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+    expect(find.text('New Ad'), findsOneWidget);
+    Navigator.of(tester.element(find.text('New Ad'))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     // User detail panel from Users.
     await tab('Users');

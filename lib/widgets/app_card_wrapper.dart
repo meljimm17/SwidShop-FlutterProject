@@ -12,6 +12,7 @@ class AppCardWrapper extends StatelessWidget {
     this.onTap,
     this.color,
     this.margin,
+    this.border,
   });
 
   final Widget child;
@@ -19,6 +20,9 @@ class AppCardWrapper extends StatelessWidget {
   final VoidCallback? onTap;
   final Color? color;
   final EdgeInsetsGeometry? margin;
+
+  /// Optional outline (e.g. coral for highlighted listings).
+  final BoxBorder? border;
 
   @override
   Widget build(BuildContext context) {
@@ -28,6 +32,7 @@ class AppCardWrapper extends StatelessWidget {
       decoration: BoxDecoration(
         color: color ?? AppColors.surface,
         borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+        border: border,
         boxShadow: const [
           BoxShadow(
             color: Color(0x14000000),

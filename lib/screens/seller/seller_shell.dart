@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
+import '../../models/user_model.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/seller_provider.dart';
+import '../../services/firestore_service.dart';
+import '../../services/notification_service.dart';
 import '../customer/profile_screen.dart';
 import 'dashboard_screen.dart';
 import 'my_listings_screen.dart';
@@ -35,6 +39,30 @@ class _SellerShellState extends State<SellerShell> {
   void initState() {
     super.initState();
     context.read<SellerProvider>().start();
+    // Client-side scheduler stand-in (functions never deploy): expire
+    // boosts/features/plans, send fee reminders, apply overdue holds.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final uid = context.read<AuthProvider>().firebaseUser?.uid ?? '';
+      if (uid.isEmpty) return;
+      final firestore = FirestoreService();
+      // ignore: unawaited_futures
+      firestore.runSellerMaintenance(uid);
+      _registerPushToken(firestore, uid);
+    });
+  }
+
+  /// Saves this device's FCM token so fee reminders can be pushed.
+  /// Best-effort: no permission / no Play services just means in-app only.
+  Future<void> _registerPushToken(FirestoreService firestore, String uid) async {
+    try {
+      final token = await context.read<NotificationService>().init();
+      if (token != null && token.isNotEmpty) {
+        await firestore.saveFcmToken(uid, token);
+      }
+    } catch (e) {
+      debugPrint('registerPushToken: $e');
+    }
   }
 
   void _select(SellerTab tab) {
@@ -43,6 +71,11 @@ class _SellerShellState extends State<SellerShell> {
 
   @override
   Widget build(BuildContext context) {
+    // Role changed by an admin while this was open (e.g. → Customer).
+    final role = context.select<AuthProvider, UserRole?>(
+      (a) => a.profile?.role,
+    );
+    if (role != null && !role.canSell) return const _NoSellerAccess();
     final seller = context.watch<SellerProvider>();
     final openOrders = seller.openOrders.length;
 
@@ -147,6 +180,42 @@ class _SellerShellState extends State<SellerShell> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown when the account's role no longer includes selling.
+class _NoSellerAccess extends StatelessWidget {
+  const _NoSellerAccess();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.cream,
+      appBar: AppBar(backgroundColor: AppColors.cream),
+      body: const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.storefront_outlined, size: 48, color: AppColors.gray),
+              SizedBox(height: 12),
+              Text(
+                'Seller Centre is not available for your role',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 6),
+              Text(
+                'Request "Customer + Seller" from Profile → Change role.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppColors.gray),
+              ),
+            ],
+          ),
         ),
       ),
     );

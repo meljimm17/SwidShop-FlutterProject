@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
 import '../../models/listing_model.dart';
 import '../../models/notification_model.dart';
 import '../../models/swap_offer_model.dart';
+import '../../models/user_model.dart';
+import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/auth_widgets.dart';
 import '../shared/transaction_chat_screen.dart';
@@ -17,6 +20,21 @@ Future<bool> acceptSwapOfferFlow(
   required ListingModel? mine,
   required int otherPendingOnListing,
 }) async {
+  // Fee hold: blocked from accepting swaps until fees are paid.
+  final hold =
+      context.read<AuthProvider>().profile?.accountStatus ==
+          AccountStatus.onHold;
+  if (hold) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Your shop is on hold over unpaid fees — pay them from the Seller Dashboard to accept swaps.',
+        ),
+        backgroundColor: AppColors.red,
+      ),
+    );
+    return false;
+  }
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => AlertDialog(

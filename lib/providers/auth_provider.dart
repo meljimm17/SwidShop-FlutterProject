@@ -19,6 +19,9 @@ class AuthProvider extends ChangeNotifier {
   final AuthService _auth;
   final FirestoreService _firestore;
 
+  /// uid whose legacy 'seller' role was already rewritten this session.
+  String? _migratedRoleFor;
+
   StreamSubscription<User?>? _authSub;
   StreamSubscription<UserModel?>? _profileSub;
 
@@ -76,8 +79,11 @@ class AuthProvider extends ChangeNotifier {
 
     _profileSub = _firestore.streamUser(user.uid).listen(
       (profile) {
+        // suspended/banned block sign-in. on_hold NEVER does — it is a
+        // fee hold only (blocks posting + swap accepts, nothing else).
         if (profile != null &&
-            profile.accountStatus != AccountStatus.active) {
+            (profile.accountStatus == AccountStatus.suspended ||
+                profile.accountStatus == AccountStatus.banned)) {
           _blockedReason = profile.accountStatus == AccountStatus.banned
               ? 'This account has been banned.'
               : 'This account is suspended.';
@@ -91,6 +97,16 @@ class AuthProvider extends ChangeNotifier {
         _profile = profile;
         _loading = false;
         notifyListeners();
+        // Retired seller-only role: already treated as Customer + Seller;
+        // store it that way too (once per session).
+        if (profile != null &&
+            profile.legacySellerRole &&
+            _migratedRoleFor != profile.uid) {
+          _migratedRoleFor = profile.uid;
+          _firestore
+              .migrateLegacySellerRole(profile.uid)
+              .catchError((Object e) => debugPrint('migrateRole: $e'));
+        }
       },
       // e.g. permission-denied when deployed rules don't match the app.
       onError: (Object e) {
@@ -136,7 +152,8 @@ class AuthProvider extends ChangeNotifier {
       _auth.signInWithEmail(email: email, password: password);
 
   /// One-tap demo admin (provisions on first use).
-  Future<void> signInDemoAdmin() => _auth.signInDemoAdmin();
+  Future<void> signInAdmin(String username, String password) =>
+      _auth.signInAdmin(username, password);
 
   Future<GoogleSignInResult> signInWithGoogle() => _auth.signInWithGoogle();
 

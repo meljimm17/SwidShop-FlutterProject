@@ -5,9 +5,13 @@ import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/listing_model.dart';
 import '../../models/transaction_model.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/seller_provider.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/monthly_bars.dart';
+import '../../widgets/primary_button.dart';
+import '../../widgets/top_app_bar.dart';
+import 'plans_screen.dart';
 
 /// Seller analytics from live data: sell-through, average sale, monthly
 /// settled totals and a breakdown by listing type.
@@ -27,6 +31,54 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Pro perk: locked for other plans (upgrade prompt instead of data).
+    final plan = context.select<AuthProvider, String>(
+      (a) => a.profile?.effectivePlan ?? 'free',
+    );
+    if (plan != 'pro') {
+      return Scaffold(
+        backgroundColor: AppColors.cream,
+        appBar: const TopAppBar(title: 'Analytics'),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.lock_outline,
+                  size: 56,
+                  color: AppColors.gray,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Sales Analytics is a Pro perk.',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Upgrade to Pro for sell-through, averages and monthly breakdowns.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppColors.gray),
+                ),
+                const SizedBox(height: 24),
+                PrimaryButton(
+                  label: 'See Plans',
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const PlansScreen(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     final s = context.watch<SellerProvider>();
     final completed = s.completedSales;
     final counted = s.listings

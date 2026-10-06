@@ -474,19 +474,10 @@ class _TxnTrailing extends StatelessWidget {
             builder: (context, snap) {
               if (snap.data == false) {
                 return TextButton(
-                  onPressed: () => showModalBottomSheet<void>(
-                    context: context,
-                    backgroundColor: AppColors.surface,
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.vertical(
-                        top: Radius.circular(20),
-                      ),
-                    ),
-                    builder: (_) => RateSheet(
-                      transactionId: txn.transactionId,
-                      ratedUserId: txn.sellerId,
-                      ratedName: '',
-                    ),
+                  onPressed: () => RateSheet.show(
+                    context,
+                    transactionId: txn.transactionId,
+                    ratedUserId: txn.sellerId,
                   ),
                   child: const Text('Rate'),
                 );

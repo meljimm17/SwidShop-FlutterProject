@@ -33,7 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _obscure = true;
   bool _busy = false;
   bool _googleBusy = false;
-  bool _demoBusy = false;
+  bool _adminBusy = false;
   String? _emailError;
   String? _passwordError;
 
@@ -132,56 +132,26 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  /// Asks for the email in a dialog that owns its controller (disposing a
+  /// controller while the dialog is still animating closed throws), then
+  /// sends the Firebase reset email.
   Future<void> _forgotPassword() async {
-    final emailCtrl = TextEditingController(text: _emailCtrl.text.trim());
-    final sent = await showDialog<bool>(
+    final email = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('Reset password'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "We'll email you a link to set a new password.",
-              style: TextStyle(color: AppColors.gray),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: emailCtrl,
-              keyboardType: TextInputType.emailAddress,
-              decoration: const InputDecoration(
-                hintText: 'you@example.com',
-                prefixIcon: Icon(Icons.mail_outline),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Send link'),
-          ),
-        ],
-      ),
+      builder: (_) => _ResetPasswordDialog(initialEmail: _emailCtrl.text.trim()),
     );
-    final email = emailCtrl.text.trim();
-    emailCtrl.dispose();
-    if (sent != true || !mounted) return;
-    if (email.isEmpty) {
-      _snack('Enter your email first.');
-      return;
-    }
+    if (email == null || !mounted) return;
     try {
       await context.read<AuthProvider>().sendPasswordReset(email);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Reset link sent to $email.')),
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text(
+            'If an account exists for $email, a reset link is on its way. '
+            'Check your Spam folder too.',
+          ),
+        ),
       );
     } catch (e) {
       if (!mounted) return;
@@ -197,23 +167,28 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  /// Class-demo shortcut: signs in (or provisions) the shared demo admin,
-  /// then routes by role like any other sign-in.
-  Future<void> _continueAsAdmin() async {
-    setState(() => _demoBusy = true);
+  /// Admin login: asks for the admin username + password, then routes by
+  /// role like any other sign-in.
+  Future<void> _adminLogin() async {
+    final creds = await showDialog<(String, String)>(
+      context: context,
+      builder: (_) => const _AdminLoginDialog(),
+    );
+    if (creds == null || !mounted) return;
+    setState(() => _adminBusy = true);
     try {
-      await context.read<AuthProvider>().signInDemoAdmin();
+      await context.read<AuthProvider>().signInAdmin(creds.$1, creds.$2);
       if (mounted) await goAfterAuth(context);
     } catch (e) {
       if (mounted) _snack(AuthService.messageFor(e));
     } finally {
-      if (mounted) setState(() => _demoBusy = false);
+      if (mounted) setState(() => _adminBusy = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final anyBusy = _busy || _googleBusy || _demoBusy;
+    final anyBusy = _busy || _googleBusy || _adminBusy;
     final canPop = Navigator.of(context).canPop();
 
     return Scaffold(
@@ -322,8 +297,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: anyBusy ? null : _signInWithGoogle,
                 ),
                 const SizedBox(height: 32),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     const Text(
                       "Don't have an account?",
@@ -357,11 +333,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 if (!canPop)
                   Center(
                     child: TextButton.icon(
-                      onPressed: anyBusy ? null : _continueAsAdmin,
+                      onPressed: anyBusy ? null : _adminLogin,
                       style: TextButton.styleFrom(
                         foregroundColor: AppColors.teal,
                       ),
-                      icon: _demoBusy
+                      icon: _adminBusy
                           ? const SizedBox(
                               width: 14,
                               height: 14,
@@ -369,7 +345,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             )
                           : const Icon(Icons.admin_panel_settings_outlined,
                               size: 18),
-                      label: const Text('Continue as Admin (demo)'),
+                      label: const Text('Admin login'),
                     ),
                   ),
               ],
@@ -377,6 +353,188 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Username + password prompt for the admin account. Checks the
+/// credentials locally first so a typo never reaches Firebase.
+class _AdminLoginDialog extends StatefulWidget {
+  const _AdminLoginDialog();
+
+  @override
+  State<_AdminLoginDialog> createState() => _AdminLoginDialogState();
+}
+
+class _AdminLoginDialogState extends State<_AdminLoginDialog> {
+  final _userCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _obscure = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _userCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final user = _userCtrl.text.trim();
+    final pass = _passCtrl.text;
+    if (user.isEmpty || pass.isEmpty) {
+      setState(() => _error = 'Enter the username and password.');
+      return;
+    }
+    if (!AuthService.isAdminLogin(user, pass)) {
+      setState(() => _error = 'Incorrect admin username or password.');
+      return;
+    }
+    Navigator.of(context).pop((user, pass));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: const Text('Admin login'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _userCtrl,
+            autofocus: true,
+            autocorrect: false,
+            textInputAction: TextInputAction.next,
+            decoration: const InputDecoration(
+              labelText: 'Username',
+              prefixIcon: Icon(Icons.person_outline),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _passCtrl,
+            obscureText: _obscure,
+            autocorrect: false,
+            enableSuggestions: false,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
+              labelText: 'Password',
+              prefixIcon: const Icon(Icons.lock_outline),
+              suffixIcon: IconButton(
+                tooltip: _obscure ? 'Show password' : 'Hide password',
+                icon: Icon(
+                  _obscure
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _error!,
+              style: const TextStyle(color: AppColors.red, fontSize: 13),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          style: FilledButton.styleFrom(backgroundColor: AppColors.teal),
+          child: const Text('Log in'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Email prompt for the password reset link. Validates the address before
+/// returning it; owns (and disposes) its own controller.
+class _ResetPasswordDialog extends StatefulWidget {
+  const _ResetPasswordDialog({required this.initialEmail});
+
+  final String initialEmail;
+
+  @override
+  State<_ResetPasswordDialog> createState() => _ResetPasswordDialogState();
+}
+
+class _ResetPasswordDialogState extends State<_ResetPasswordDialog> {
+  late final _ctrl = TextEditingController(text: widget.initialEmail);
+  String? _error;
+
+  static final _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final email = _ctrl.text.trim();
+    if (email.isEmpty) {
+      setState(() => _error = 'Enter your email.');
+      return;
+    }
+    if (!_emailPattern.hasMatch(email)) {
+      setState(() => _error = 'That email address is not valid.');
+      return;
+    }
+    Navigator.of(context).pop(email);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: const Text('Reset password'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "We'll email you a link to set a new password.",
+            style: TextStyle(color: AppColors.gray),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _ctrl,
+            autofocus: widget.initialEmail.isEmpty,
+            keyboardType: TextInputType.emailAddress,
+            autocorrect: false,
+            textInputAction: TextInputAction.send,
+            onSubmitted: (_) => _submit(),
+            onChanged: (_) {
+              if (_error != null) setState(() => _error = null);
+            },
+            decoration: InputDecoration(
+              hintText: 'you@example.com',
+              prefixIcon: const Icon(Icons.mail_outline),
+              errorText: _error,
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('Send link'),
+        ),
+      ],
     );
   }
 }

@@ -1,9 +1,30 @@
 rules_version = '2';
 
 // SwidShop Firestore security rules.
-// Production posture: deny by default, allow only what the app needs.
+//
+// NOTE: NOT deployed yet (professor's rule — live rules stay
+// `allow read, write: if true` for class testing). This file is the
+// intended production posture; it is exercised against the local emulator
+// (see AGENTS.md). Deny by default, allow only what the app does.
+//
+// Monetization (demo money only):
+//  * Every purchase is ONE batch: a `payments` record + the perk it buys.
+//    The perk write names its payment (deterministic `fee_{txnId}` /
+//    `photo_pack_{listingId}` ids, or `lastPaymentId` / `featuredPaymentId`)
+//    and the rules check that this payment is brand new in the same commit
+//    (!exists && existsAfter) and belongs to the caller. So users can never
+//    set boostedUntil, featuredUntil, plan, planUntil, photoLimit, bumpedAt,
+//    accountStatus, feeRate, feeAmount, feeStatus or feeDueAt directly.
+//  * Payments are create-own only, priced like AppConstants, immutable.
+//  * Expired windows may be cleared by their owner (client-side expiry
+//    stand-in); the Cloud Functions + admin bypass all of this.
+//
+// KEEP IN SYNC with lib/core/constants.dart (prices, rates, limits) —
+// test/monetization_rules_sync_test.dart fails if they drift.
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // -- basics ---------------------------------------------------------
 
     function isSignedIn() {
       return request.auth != null;
@@ -17,31 +38,394 @@ service cloud.firestore {
       return isSignedIn() && uid() == userId;
     }
 
-    function isAdmin() {
-      return isSignedIn() &&
-        get(/databases/$(database)/documents/users/$(uid())).data.role == 'admin';
+    function userPath(u) {
+      return /databases/$(database)/documents/users/$(u);
     }
 
+    function isAdmin() {
+      return isSignedIn() && exists(userPath(uid())) &&
+        get(userPath(uid())).data.get('role', '') == 'admin';
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Same value before/after, a missing field counting as its default.
+    function same(k, dflt) {
+      return request.resource.data.get(k, dflt) == resource.data.get(k, dflt);
+    }
+
+    // Client clock tolerance for computed windows.
+    function slack() {
+      return duration.value(1, 'h');
+    }
+
+    function laterOfNow(t) {
+      return t != null && t > request.time ? t : request.time;
+    }
+
+    // -- monetization constants (mirror AppConstants) --------------------
+
+    function planPrice(p) {
+      return p == 'plus' ? 149 : (p == 'pro' ? 299 : -1);
+    }
+
+    function planDays() {
+      return 30;
+    }
+
+    function boostPrice(days) {
+      return days == 3 ? 49 : (days == 7 ? 99 : (days == 14 ? 179 : -1));
+    }
+
+    function featuredPrice() {
+      return 79;
+    }
+
+    function featuredDays() {
+      return 7;
+    }
+
+    function photoPackPrice() {
+      return 49;
+    }
+
+    function photoPackLimit() {
+      return 8;
+    }
+
+    function highlightDays() {
+      return 7;
+    }
+
+    function feeDueDays() {
+      return 7;
+    }
+
+    function rateFor(plan) {
+      return plan == 'pro' ? 0.03 : (plan == 'plus' ? 0.04 : 0.05);
+    }
+
+    function photoLimitFor(plan) {
+      return plan == 'pro' ? 15 : (plan == 'plus' ? 8 : 3);
+    }
+
+    function maxAuctionDays(plan) {
+      return plan == 'pro' ? 14 : 7;
+    }
+
+    // Plan that applies now (lapsed or unknown → free).
+    function effPlanOf(d) {
+      return d.get('plan', 'free') in ['plus', 'pro'] &&
+        (d.get('planUntil', null) == null || d.planUntil > request.time)
+        ? d.get('plan', 'free') : 'free';
+    }
+
+    function userData(u) {
+      return get(userPath(u)).data;
+    }
+
+    function planOf(u) {
+      return effPlanOf(userData(u));
+    }
+
+    function statusOf(u) {
+      return userData(u).get('accountStatus', 'active');
+    }
+
+    // -- payments linkage --------------------------------------------------
+
+    function paymentPath(pid) {
+      return /databases/$(database)/documents/payments/$(pid);
+    }
+
+    function payAfter(pid) {
+      return getAfter(paymentPath(pid)).data;
+    }
+
+    // A payment created by the caller in THIS commit.
+    function isNewPayment(pid) {
+      return pid is string && pid != '' &&
+        !exists(paymentPath(pid)) &&
+        existsAfter(paymentPath(pid)) &&
+        payAfter(pid).userId == uid();
+    }
+
+    // The caller owns the Photo Pack for this listing (now or earlier).
+    function hasPhotoPack(listingId) {
+      return existsAfter(paymentPath('photo_pack_' + listingId)) &&
+        payAfter('photo_pack_' + listingId).userId == uid();
+    }
+
+    // =====================================================================
     // users/{uid}
+    // =====================================================================
+
+    // Monetization/moderation state untouched (ordinary profile edit).
+    function monetUnchanged() {
+      return same('plan', 'free') && same('planUntil', null) &&
+        same('boostedUntil', null) && same('accountStatus', 'active') &&
+        same('holdManual', false) && same('lastPaymentId', '');
+    }
+
+    // Cheap guard: purchase paths only apply when a new payment is named.
+    function newLastPayment() {
+      return !same('lastPaymentId', '');
+    }
+
+    // Plus/Pro bought in this commit: plan matches the payment, window at
+    // most 30 days past the current one (renewal) or now (switch).
+    function planPurchase() {
+      let r = request.resource.data;
+      let pid = r.get('lastPaymentId', '');
+      return newLastPayment() &&
+        same('boostedUntil', null) && same('accountStatus', 'active') &&
+        same('holdManual', false) &&
+        isNewPayment(pid) &&
+        payAfter(pid).type == 'plan' &&
+        r.get('plan', '') == payAfter(pid).plan &&
+        r.get('planUntil', null) is timestamp &&
+        r.planUntil <= (effPlanOf(resource.data) == payAfter(pid).plan
+            ? laterOfNow(resource.data.get('planUntil', null))
+            : request.time) +
+          duration.value(planDays(), 'd') + slack();
+    }
+
+    // Shop boost bought in this commit, stacking onto an active one.
+    function boostPurchase() {
+      let r = request.resource.data;
+      let pid = r.get('lastPaymentId', '');
+      return newLastPayment() &&
+        same('plan', 'free') && same('planUntil', null) &&
+        same('accountStatus', 'active') && same('holdManual', false) &&
+        isNewPayment(pid) &&
+        payAfter(pid).type == 'boost' &&
+        r.get('boostedUntil', null) is timestamp &&
+        r.boostedUntil <= laterOfNow(resource.data.get('boostedUntil', null)) +
+          duration.value(payAfter(pid).days, 'd') + slack();
+    }
+
+    // Paying fees lifts the AUTOMATIC fee hold in the same commit (an
+    // admin's manual hold is lifted by an admin only).
+    function feeHoldLift() {
+      let r = request.resource.data;
+      let pid = r.get('lastPaymentId', '');
+      return newLastPayment() &&
+        resource.data.get('accountStatus', 'active') == 'on_hold' &&
+        r.get('accountStatus', '') == 'active' &&
+        resource.data.get('holdManual', false) != true &&
+        same('plan', 'free') && same('planUntil', null) &&
+        same('boostedUntil', null) && same('holdManual', false) &&
+        isNewPayment(pid) &&
+        payAfter(pid).type == 'fee';
+    }
+
+    // Client-side overdue check may place the automatic hold on oneself.
+    function selfHold() {
+      return resource.data.get('accountStatus', 'active') == 'active' &&
+        request.resource.data.get('accountStatus', '') == 'on_hold' &&
+        same('plan', 'free') && same('planUntil', null) &&
+        same('boostedUntil', null) && same('holdManual', false) &&
+        same('lastPaymentId', '');
+    }
+
+    // Owner clears windows that have already ended.
+    function userExpiry() {
+      let r = request.resource.data;
+      let o = resource.data;
+      return same('accountStatus', 'active') && same('holdManual', false) &&
+        same('lastPaymentId', '') &&
+        ((same('plan', 'free') && same('planUntil', null)) ||
+          (r.get('plan', '') == 'free' && r.get('planUntil', null) == null &&
+            o.get('planUntil', null) != null && o.planUntil <= request.time)) &&
+        (same('boostedUntil', null) ||
+          (r.get('boostedUntil', null) == null &&
+            o.get('boostedUntil', null) != null &&
+            o.boostedUntil <= request.time));
+    }
+
+    // Raters refresh another user's average (RateSheet → refreshUserRating).
+    function ratingRefresh() {
+      return changedKeys().hasOnly(['avgRating']) &&
+        request.resource.data.avgRating is number &&
+        request.resource.data.avgRating >= 0 &&
+        request.resource.data.avgRating <= 5;
+    }
+
+    // Owner edits, dispatched on cheap checks so only ONE path is fully
+    // evaluated (keeps well under the rules expression budget).
+    function ownerUserUpdate() {
+      // Roles: customer or both (Customer + Seller). Picked during
+      // registration; afterwards changed only by an admin-approved role
+      // request — except the retired 'seller' role, which its owner's app
+      // rewrites to 'both'.
+      return (same('role', 'customer') ||
+          (request.resource.data.get('role', '') in ['customer', 'both'] &&
+            (resource.data.get('profileComplete', true) == false ||
+              (resource.data.get('role', '') == 'seller' &&
+                request.resource.data.role == 'both')))) &&
+        (monetUnchanged() ||
+          (newLastPayment()
+            ? (request.resource.data.get('accountStatus', 'active') !=
+                resource.data.get('accountStatus', 'active')
+                ? feeHoldLift()
+                : (same('boostedUntil', null) ? planPurchase() : boostPurchase()))
+            : (same('accountStatus', 'active') ? userExpiry() : selfHold())));
+    }
+
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow create, update: if isOwner(userId) || isAdmin();
+      // New accounts start on free/active defaults; role 'admin' and
+      // monetization state are never self-granted.
+      allow create: if isAdmin() || (isOwner(userId) &&
+        request.resource.data.get('role', 'customer') in ['customer', 'both'] &&
+        request.resource.data.get('plan', 'free') == 'free' &&
+        request.resource.data.get('planUntil', null) == null &&
+        request.resource.data.get('boostedUntil', null) == null &&
+        request.resource.data.get('accountStatus', 'active') == 'active' &&
+        request.resource.data.get('holdManual', false) == false &&
+        request.resource.data.get('lastPaymentId', '') == '');
+      allow update: if isOwner(userId)
+        ? (ownerUserUpdate() || isAdmin())
+        : (isAdmin() || (isSignedIn() && ratingRefresh()));
       allow delete: if isAdmin();
 
-      // users/{uid}/private/details — phone, street, ID photos, terms.
-      // Never readable by other users.
+      // users/{uid}/private/details — phone, street, ID photos, terms,
+      // FCM token. Never readable by other users.
       match /private/{docId} {
         allow read, create, update: if isOwner(userId) || isAdmin();
         allow delete: if isAdmin();
       }
     }
 
+    // =====================================================================
     // listings/{listingId}
+    // =====================================================================
+
+    function photoCap(seller, photoLimit) {
+      return photoLimit == photoPackLimit() &&
+        photoLimitFor(planOf(seller)) < photoPackLimit()
+        ? photoPackLimit() : photoLimitFor(planOf(seller));
+    }
+
+    // Set or changed (posting, or the seller moving a live auction's end
+    // earlier/later): must be in the future and within the plan maximum.
+    function validAuctionEnd(r, seller) {
+      return r.get('auctionEndAt', null) == null ||
+        (r.auctionEndAt > request.time &&
+          r.auctionEndAt <= request.time +
+            duration.value(maxAuctionDays(planOf(seller)), 'd') + slack());
+    }
+
+    function validBuyNowPrice(r, seller) {
+      return r.get('buyNowPrice', null) == null || planOf(seller) == 'pro';
+    }
+
+    function validPhotoLimit(r, listingId) {
+      return r.get('photoLimit', null) == null ||
+        (r.photoLimit == photoPackLimit() && hasPhotoPack(listingId));
+    }
+
+    // Featured bought in this commit for THIS listing.
+    function featuredPurchase(listingId) {
+      let r = request.resource.data;
+      let pid = r.get('featuredPaymentId', '');
+      return isNewPayment(pid) &&
+        payAfter(pid).type == 'featured' &&
+        payAfter(pid).relatedId == listingId &&
+        r.get('featuredUntil', null) is timestamp &&
+        r.featuredUntil <= laterOfNow(resource.data.get('featuredUntil', null)) +
+          duration.value(featuredDays(), 'd') + slack();
+    }
+
+    function endedWindowCleared(k) {
+      return request.resource.data.get(k, null) == null &&
+        resource.data.get(k, null) != null &&
+        resource.data[k] <= request.time;
+    }
+
+    function ownerListingUpdate(listingId) {
+      let r = request.resource.data;
+      let o = resource.data;
+      let keys = changedKeys();
+      let seller = o.sellerId;
+      return same('sellerId', '') &&
+        (!keys.hasAny(['featuredUntil', 'featuredPaymentId']) ||
+          featuredPurchase(listingId) ||
+          (!keys.hasAny(['featuredPaymentId']) &&
+            endedWindowCleared('featuredUntil'))) &&
+        (!keys.hasAny(['highlightUntil']) ||
+          (planOf(seller) == 'pro' && r.get('highlightUntil', null) is timestamp &&
+            r.highlightUntil <= request.time +
+              duration.value(highlightDays(), 'd') + slack()) ||
+          endedWindowCleared('highlightUntil')) &&
+        (!keys.hasAny(['bumpedAt']) ||
+          (planOf(seller) == 'pro' && r.get('bumpedAt', null) == request.time &&
+            (o.get('bumpedAt', null) == null ||
+              request.time > o.bumpedAt + duration.value(24, 'h')))) &&
+        (!keys.hasAny(['photoLimit']) || validPhotoLimit(r, listingId)) &&
+        (!keys.hasAny(['hidden']) || r.get('hidden', false) == true ||
+          getAfter(userPath(seller)).data.get('accountStatus', 'active') == 'active') &&
+        (!keys.hasAny(['images']) ||
+          r.get('images', []).size() <= photoCap(seller, r.get('photoLimit', null))) &&
+        (!keys.hasAny(['buyNowPrice']) || validBuyNowPrice(r, seller)) &&
+        (!keys.hasAny(['auctionEndAt']) || validAuctionEnd(r, seller));
+    }
+
+    // A bidder's placeBid write (the bid doc is created in the same txn).
+    function bidUpdate() {
+      let r = request.resource.data;
+      let o = resource.data;
+      return changedKeys().hasOnly(['currentHighestBid', 'highestBidderId', 'bidCount']) &&
+        o.get('status', '') == 'active' && o.get('hidden', false) != true &&
+        r.get('highestBidderId', '') == uid() &&
+        r.currentHighestBid > o.get('currentHighestBid', 0) &&
+        r.get('bidCount', 0) == o.get('bidCount', 0) + 1;
+    }
+
+    // Buyer's Buy Now (or Buy It Now) marks the listing sold.
+    function buyerMarksSold() {
+      return changedKeys().hasOnly(['status']) &&
+        resource.data.get('status', '') == 'active' &&
+        resource.data.get('hidden', false) != true &&
+        request.resource.data.status == 'sold';
+    }
+
+    // Anyone watching may close an auction that has ended.
+    function auctionClose() {
+      return changedKeys().hasOnly(['status', 'currentHighestBid']) &&
+        resource.data.get('type', '') == 'bid' &&
+        resource.data.get('status', '') == 'active' &&
+        resource.data.get('auctionEndAt', null) != null &&
+        resource.data.auctionEndAt <= request.time &&
+        request.resource.data.status in ['sold', 'expired'];
+    }
+
     match /listings/{listingId} {
       allow read: if true;
+      // Posting is free but blocked on hold; paid perks start empty
+      // (a Photo Pack may be bought before the listing is saved).
       allow create: if isSignedIn() &&
-        request.resource.data.sellerId == uid();
-      allow update, delete: if isSignedIn() &&
+        request.resource.data.sellerId == uid() &&
+        (isAdmin() || (
+          statusOf(uid()) == 'active' &&
+          request.resource.data.get('featuredUntil', null) == null &&
+          request.resource.data.get('featuredPaymentId', '') == '' &&
+          request.resource.data.get('highlightUntil', null) == null &&
+          request.resource.data.get('bumpedAt', null) == null &&
+          request.resource.data.get('hidden', false) == false &&
+          validPhotoLimit(request.resource.data, listingId) &&
+          request.resource.data.get('images', []).size() <=
+            photoCap(uid(), request.resource.data.get('photoLimit', null)) &&
+          validBuyNowPrice(request.resource.data, uid()) &&
+          validAuctionEnd(request.resource.data, uid())
+        ));
+      allow update: if isAdmin() ||
+        (isOwner(resource.data.sellerId) && ownerListingUpdate(listingId)) ||
+        (isSignedIn() && !isOwner(resource.data.sellerId) &&
+          (bidUpdate() || buyerMarksSold() || auctionClose()));
+      allow delete: if isSignedIn() &&
         (resource.data.sellerId == uid() || isAdmin());
     }
 
@@ -58,19 +442,64 @@ service cloud.firestore {
       allow read: if isSignedIn();
       // sellerId must be the target listing's owner (denormalised so the
       // seller can query their incoming offers).
+      // The offered item is a listing (offeredItemId) or a photo offer
+      // (offeredTitle + 1–4 offeredImages, no listing needed).
       allow create: if isSignedIn() &&
         request.resource.data.offeredById == uid() &&
         request.resource.data.sellerId ==
-          get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.sellerId;
+          get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.sellerId &&
+        request.resource.data.get('offeredImages', []).size() <= 4 &&
+        (request.resource.data.get('offeredItemId', '') != '' ||
+          (request.resource.data.get('offeredImages', []).size() >= 1 &&
+            request.resource.data.get('offeredTitle', '') != ''));
       // Offerer (withdraw) or the listing's seller (accept / decline).
-      allow update: if isSignedIn() &&
+      // Accepting is blocked while the seller is on hold.
+      allow update: if isAdmin() || (isSignedIn() &&
         (resource.data.offeredById == uid() ||
-         resource.data.sellerId == uid() ||
-         isAdmin());
+         resource.data.sellerId == uid()) &&
+        (request.resource.data.get('status', '') != 'accepted' ||
+         statusOf(resource.data.sellerId) == 'active'));
       allow delete: if isAdmin();
     }
 
-    // transactions/{transactionId}
+    // =====================================================================
+    // transactions/{transactionId} — fee ledger
+    // =====================================================================
+
+    // Fee stamped at deal time: swaps carry none; Bidding / Buy Now carry
+    // the seller's current plan rate, due in 7 days.
+    function validNewFee(r) {
+      return r.get('type', '') == 'swap'
+        ? (r.get('feeStatus', 'none') == 'none' && r.get('feeAmount', 0) == 0)
+        : (r.get('feeStatus', '') == 'unpaid' &&
+            r.get('feeRate', -1) == rateFor(planOf(r.sellerId)) &&
+            math.abs(r.get('feeAmount', -1) - r.amount * r.feeRate) < 0.011 &&
+            r.get('feeDueAt', null) is timestamp &&
+            r.feeDueAt > request.time + duration.value(feeDueDays(), 'd') - slack() &&
+            r.feeDueAt < request.time + duration.value(feeDueDays(), 'd') + slack() &&
+            r.get('paidAt', null) == null);
+    }
+
+    function feeUpdateOk(transactionId) {
+      let r = request.resource.data;
+      let o = resource.data;
+      let keys = changedKeys();
+      let feeKeys = ['feeRate', 'feeAmount', 'feeDueAt', 'feeStatus', 'paidAt'];
+      return !keys.hasAny(feeKeys) ||
+        // unpaid → paid, only with this fee's brand-new payment record.
+        (!keys.hasAny(['feeRate', 'feeAmount', 'feeDueAt']) &&
+          o.get('feeStatus', 'none') == 'unpaid' &&
+          r.get('feeStatus', '') == 'paid' &&
+          r.get('paidAt', null) == request.time &&
+          o.sellerId == uid() &&
+          isNewPayment('fee_' + transactionId)) ||
+        // unpaid → void, only when the deal itself is cancelled.
+        (!keys.hasAny(['feeRate', 'feeAmount', 'feeDueAt', 'paidAt']) &&
+          o.get('feeStatus', 'none') == 'unpaid' &&
+          r.get('feeStatus', '') == 'void' &&
+          r.get('status', '') == 'cancelled');
+    }
+
     match /transactions/{transactionId} {
       allow read: if isSignedIn() &&
         (resource.data.buyerId == uid() ||
@@ -78,19 +507,30 @@ service cloud.firestore {
          isAdmin());
       allow create: if isSignedIn() &&
         (request.resource.data.buyerId == uid() ||
-         request.resource.data.sellerId == uid());
-      allow update: if isSignedIn() &&
+         request.resource.data.sellerId == uid()) &&
+        (isAdmin() || validNewFee(request.resource.data));
+      allow update: if isAdmin() || (isSignedIn() &&
         (resource.data.buyerId == uid() ||
-         resource.data.sellerId == uid() ||
-         isAdmin());
+         resource.data.sellerId == uid()) &&
+        same('buyerId', '') && same('sellerId', '') &&
+        feeUpdateOk(transactionId));
     }
 
-    // chats/{transactionId}/messages
-    match /chats/{transactionId}/messages/{messageId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() &&
-        request.resource.data.senderId == uid();
-      allow update, delete: if isAdmin();
+    // chats/{transactionId} parent doc (thread index) + messages.
+    match /chats/{transactionId} {
+      allow read: if isAdmin() || (isSignedIn() &&
+        (resource == null || resource.data.buyerId == uid() ||
+         resource.data.sellerId == uid()));
+      allow create, update: if isSignedIn() &&
+        (request.resource.data.buyerId == uid() ||
+         request.resource.data.sellerId == uid());
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() &&
+          request.resource.data.senderId == uid();
+        allow update, delete: if isAdmin();
+      }
     }
 
     // ratings/{ratingId}
@@ -120,6 +560,84 @@ service cloud.firestore {
       allow read, update: if isOwner(userId) || isAdmin();
       allow create: if isSignedIn();
       allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // =====================================================================
+    // payments/{paymentId} — simulated GCash records (immutable)
+    // =====================================================================
+
+    function txnData(id) {
+      return get(/databases/$(database)/documents/transactions/$(id)).data;
+    }
+
+    function listingPath(id) {
+      return /databases/$(database)/documents/listings/$(id);
+    }
+
+    function validPayment(pid, d) {
+      return d.type == 'fee'
+        ? (pid == 'fee_' + d.get('relatedId', '') &&
+            txnData(d.relatedId).get('sellerId', '') == uid() &&
+            txnData(d.relatedId).get('feeStatus', '') == 'unpaid' &&
+            d.amount == txnData(d.relatedId).get('feeAmount', -1))
+        : d.type == 'plan'
+        ? (d.get('plan', '') in ['plus', 'pro'] &&
+            d.get('days', 0) == planDays() &&
+            d.amount == planPrice(d.plan))
+        : d.type == 'boost'
+        ? (d.get('days', 0) in [3, 7, 14] &&
+            d.amount == boostPrice(d.days))
+        : d.type == 'featured'
+        ? (d.get('days', 0) == featuredDays() &&
+            d.amount == featuredPrice() &&
+            exists(listingPath(d.get('relatedId', '-'))) &&
+            get(listingPath(d.relatedId)).data.sellerId == uid())
+        : d.type == 'photo_pack'
+        ? (pid == 'photo_pack_' + d.get('relatedId', '') &&
+            d.amount == photoPackPrice() &&
+            (!exists(listingPath(d.relatedId)) ||
+              get(listingPath(d.relatedId)).data.sellerId == uid()))
+        : false;
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.userId == uid());
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == uid() &&
+        request.resource.data.get('paymentId', '') == paymentId &&
+        request.resource.data.get('createdAt', null) == request.time &&
+        validPayment(paymentId, request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // roleRequests/{uid} — one role-change request per user; an admin
+    // approves (changes users/{uid}.role) or declines.
+    match /roleRequests/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isAdmin() || (isOwner(userId) &&
+        request.resource.data.get('uid', '') == userId &&
+        request.resource.data.get('status', '') == 'pending' &&
+        request.resource.data.get('requestedRole', '') in ['customer', 'both'] &&
+        request.resource.data.requestedRole != request.resource.data.get('currentRole', '') &&
+        request.resource.data.get('adminNote', '') == '' &&
+        request.resource.data.get('decidedBy', '') == '');
+      allow delete: if isAdmin() ||
+        (isOwner(userId) && resource.data.get('status', '') == 'pending');
+    }
+
+    // demoPurchases/{id} — payment records saved by the earlier build.
+    // Read-only history for admin revenue; no new writes.
+    match /demoPurchases/{purchaseId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.userId == uid());
+      allow write: if false;
+    }
+
+    // partnerAds/{adId} — public read, admin-only management.
+    match /partnerAds/{adId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
     }
   }
 }

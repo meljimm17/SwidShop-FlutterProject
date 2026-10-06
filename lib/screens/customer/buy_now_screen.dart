@@ -78,7 +78,15 @@ class _BuyNowScreenState extends State<BuyNowScreen> {
   }
 
   Widget _summary(ListingModel listing) {
-    final sold = listing.status != ListingStatus.active;
+    // Unavailable: sold, on-hold seller, or an auction whose Buy It Now
+    // closed (bids reached it / auction ended).
+    final sold = listing.status != ListingStatus.active ||
+        listing.hidden ||
+        (listing.type == ListingType.bid && !listing.buyItNowOpen);
+    // Auctions with a Buy It Now price confirm at that price.
+    final price = listing.type == ListingType.bid
+        ? listing.buyNowPrice
+        : listing.price;
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -104,7 +112,7 @@ class _BuyNowScreenState extends State<BuyNowScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    AppUtils.formatCurrency(listing.price),
+                    AppUtils.formatCurrency(price),
                     style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w800,
@@ -150,16 +158,18 @@ class _BuyNowScreenState extends State<BuyNowScreen> {
         ),
         const SizedBox(height: 24),
         if (sold)
-          const Center(
+          Center(
             child: Text(
-              'This item just sold.',
-              style: TextStyle(color: AppColors.gray),
+              listing.status != ListingStatus.active
+                  ? 'This item just sold.'
+                  : 'This item is not available to buy right now.',
+              style: const TextStyle(color: AppColors.gray),
             ),
           )
         else
           PrimaryButton(
             label:
-                'Confirm Purchase — ${AppUtils.formatCurrency(listing.price)}',
+                'Confirm Purchase — ${AppUtils.formatCurrency(price)}',
             loading: _busy,
             onPressed: _busy ? null : () => _confirm(listing),
           ),

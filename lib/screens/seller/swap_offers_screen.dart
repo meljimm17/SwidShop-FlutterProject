@@ -8,6 +8,7 @@ import '../../models/swap_offer_model.dart';
 import '../../providers/seller_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
+import '../../widgets/photo_viewer.dart';
 import '../../widgets/star_rating_display.dart';
 import 'swap_offer_actions.dart';
 
@@ -34,8 +35,8 @@ class _SwapOffersScreenState extends State<SwapOffersScreen> {
     context.read<SellerProvider>().start();
   }
 
-  Future<ListingModel?> _offeredItem(String id) =>
-      _offeredItems.putIfAbsent(id, () => _firestore.getListing(id));
+  Future<ListingModel?> _offeredItem(SwapOfferModel o) => _offeredItems
+      .putIfAbsent(o.offerId, () => _firestore.offeredItemFor(o));
 
   Future<void> _accept(
     SwapOfferModel offer,
@@ -98,7 +99,7 @@ class _SwapOffersScreenState extends State<SwapOffersScreen> {
                 return _OfferCard(
                   offer: offer,
                   mine: mine,
-                  offered: _offeredItem(offer.offeredItemId),
+                  offered: _offeredItem(offer),
                   busy: _busy.contains(offer.offerId),
                   onAccept: () => _accept(offer, mine, others),
                   onDecline: () => _decline(offer),
@@ -190,6 +191,7 @@ class _OfferCard extends StatelessWidget {
                     caption: 'They offer',
                     listing: snap.data,
                     loading: snap.connectionState == ConnectionState.waiting,
+                    photoOffer: offer.isPhotoOffer,
                   ),
                 ),
               ),
@@ -285,11 +287,15 @@ class _ItemSide extends StatelessWidget {
     required this.caption,
     required this.listing,
     this.loading = false,
+    this.photoOffer = false,
   });
 
   final String caption;
   final ListingModel? listing;
   final bool loading;
+
+  /// Item shown by photos from the offerer's phone (no listing).
+  final bool photoOffer;
 
   @override
   Widget build(BuildContext context) {
@@ -317,11 +323,37 @@ class _ItemSide extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                     ),
                   )
-                : ListingThumb(
-                    url: (l?.images.isNotEmpty ?? false)
-                        ? l!.images.first
+                : GestureDetector(
+                    // Tap to inspect every photo full screen.
+                    onTap: (l?.images.isNotEmpty ?? false)
+                        ? () => showPhotoGallery(
+                              context,
+                              l!.images,
+                              title: l.title,
+                            )
                         : null,
-                    size: c.maxWidth,
+                    child: Stack(
+                      children: [
+                        ListingThumb(
+                          url: (l?.images.isNotEmpty ?? false)
+                              ? l!.images.first
+                              : null,
+                          size: c.maxWidth,
+                        ),
+                        if ((l?.images.length ?? 0) > 1)
+                          Positioned(
+                            right: 6,
+                            bottom: 6,
+                            child: _Chip('+${l!.images.length - 1}'),
+                          ),
+                        if (photoOffer)
+                          const Positioned(
+                            left: 6,
+                            top: 6,
+                            child: _Chip('Photos', icon: Icons.photo_camera),
+                          ),
+                      ],
+                    ),
                   ),
           ),
         ),
@@ -338,6 +370,42 @@ class _ItemSide extends StatelessWidget {
             style: const TextStyle(fontSize: 12, color: AppColors.gray),
           ),
       ],
+    );
+  }
+}
+
+/// Small dark pill over a thumbnail ("+3", "Photos").
+class _Chip extends StatelessWidget {
+  const _Chip(this.label, {this.icon});
+
+  final String label;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 11, color: Colors.white),
+            const SizedBox(width: 3),
+          ],
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

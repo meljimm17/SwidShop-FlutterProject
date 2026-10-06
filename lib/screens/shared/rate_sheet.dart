@@ -24,6 +24,29 @@ class RateSheet extends StatefulWidget {
   final String ratedUserId;
   final String ratedName;
 
+  /// Opens the sheet full-height-capable and lifted above the keyboard so
+  /// the comment box stays visible while typing on small phones.
+  static Future<void> show(
+    BuildContext context, {
+    required String transactionId,
+    required String ratedUserId,
+    String ratedName = '',
+  }) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => RateSheet(
+        transactionId: transactionId,
+        ratedUserId: ratedUserId,
+        ratedName: ratedName,
+      ),
+    );
+  }
+
   /// True when [raterId] already rated this transaction.
   static Future<bool> alreadyRated(
     String transactionId,
@@ -110,9 +133,11 @@ class _RateSheetState extends State<RateSheet> {
 
   @override
   Widget build(BuildContext context) {
+    // Keep the form above the on-screen keyboard.
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+        padding: EdgeInsets.fromLTRB(24, 12, 24, 24 + keyboard),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -142,6 +167,8 @@ class _RateSheetState extends State<RateSheet> {
               controller: _commentCtrl,
               minLines: 2,
               maxLines: 4,
+              maxLength: 500,
+              keyboardType: TextInputType.multiline,
               textCapitalization: TextCapitalization.sentences,
               decoration: const InputDecoration(
                 labelText: 'Comment (optional)',

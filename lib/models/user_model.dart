@@ -64,6 +64,11 @@ class UserModel {
     this.trustedBadge = false,
     this.profileComplete = true,
     this.accountStatus = AccountStatus.active,
+    this.plan = 'free',
+    this.planUntil,
+    this.boostedUntil,
+    this.holdManual = false,
+    this.legacySellerRole = false,
     this.favorites = const [],
     this.following = const [],
     this.createdAt,
@@ -108,6 +113,46 @@ class UserModel {
   /// Moderation state (Phase 4.2). Missing on older docs → active.
   final AccountStatus accountStatus;
 
+  /// Seller plan as stored: 'free' | 'plus' | 'pro'. Use [effectivePlan]
+  /// for every perk/fee decision — a lapsed plan may not be reset yet.
+  final String plan;
+
+  /// When the paid plan lapses (null with a paid plan = no end date,
+  /// e.g. set by an admin).
+  final DateTime? planUntil;
+
+  /// Shop boost expiry (null = not boosted).
+  final DateTime? boostedUntil;
+
+  /// True when an admin placed the fee hold by hand: paying fees does not
+  /// lift it, only an admin does. Server-managed — never written by
+  /// [toMap].
+  final bool holdManual;
+
+  /// True when the stored role is the retired seller-only value; the app
+  /// treats it as [UserRole.both] and rewrites it (never in [toMap]).
+  final bool legacySellerRole;
+
+  /// The plan that applies right now: the stored plan while its window is
+  /// open, otherwise 'free'. Unknown values fall back to 'free'.
+  String get effectivePlan => effectivePlanOf(plan, planUntil);
+
+  /// Shared by models and tests: [plan] while [until] is open (or null).
+  static String effectivePlanOf(String plan, DateTime? until, {DateTime? now}) {
+    if (plan != 'plus' && plan != 'pro') return 'free';
+    if (until != null && !until.isAfter(now ?? DateTime.now())) return 'free';
+    return plan;
+  }
+
+  bool get isPro => effectivePlan == 'pro';
+
+  /// Plus and Pro sellers carry the Verified badge.
+  bool get isVerifiedSeller => effectivePlan != 'free';
+
+  /// True while the paid shop boost is running.
+  bool get isBoosted =>
+      boostedUntil != null && boostedUntil!.isAfter(DateTime.now());
+
   final DateTime? createdAt;
 
   factory UserModel.fromMap(String uid, Map<String, dynamic> map) {
@@ -120,6 +165,7 @@ class UserModel {
       lastName: map['lastName'] as String? ?? '',
       photoUrl: map['photoUrl'] as String? ?? '',
       role: UserRole.fromValue(map['role'] as String?),
+      legacySellerRole: map['role'] == UserRole.legacySellerValue,
       address: AddressModel.fromMap(map['address'] as Map<String, dynamic>?),
       dob: (map['dob'] as Timestamp?)?.toDate(),
       avgRating: (map['avgRating'] as num?)?.toDouble() ?? 0,
@@ -129,6 +175,10 @@ class UserModel {
       trustedBadge: map['trustedBadge'] as bool? ?? false,
       profileComplete: map['profileComplete'] as bool? ?? true,
       accountStatus: AccountStatus.fromValue(map['accountStatus'] as String?),
+      plan: map['plan'] as String? ?? 'free',
+      planUntil: (map['planUntil'] as Timestamp?)?.toDate(),
+      boostedUntil: (map['boostedUntil'] as Timestamp?)?.toDate(),
+      holdManual: map['holdManual'] as bool? ?? false,
       favorites: (map['favorites'] as List?)
               ?.map((e) => e.toString())
               .toList() ??
@@ -158,6 +208,12 @@ class UserModel {
         'trustedBadge': trustedBadge,
         'profileComplete': profileComplete,
         'accountStatus': accountStatus.value,
+        'plan': plan,
+        'planUntil':
+            planUntil != null ? Timestamp.fromDate(planUntil!) : null,
+        'boostedUntil': boostedUntil != null
+            ? Timestamp.fromDate(boostedUntil!)
+            : null,
         'favorites': favorites,
         'following': following,
         'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
@@ -180,6 +236,10 @@ class UserModel {
     bool? trustedBadge,
     bool? profileComplete,
     AccountStatus? accountStatus,
+    String? plan,
+    DateTime? planUntil,
+    DateTime? boostedUntil,
+    bool? holdManual,
     List<String>? favorites,
     List<String>? following,
     DateTime? createdAt,
@@ -202,6 +262,10 @@ class UserModel {
         trustedBadge: trustedBadge ?? this.trustedBadge,
         profileComplete: profileComplete ?? this.profileComplete,
         accountStatus: accountStatus ?? this.accountStatus,
+        plan: plan ?? this.plan,
+        planUntil: planUntil ?? this.planUntil,
+        boostedUntil: boostedUntil ?? this.boostedUntil,
+        holdManual: holdManual ?? this.holdManual,
         favorites: favorites ?? this.favorites,
         following: following ?? this.following,
         createdAt: createdAt ?? this.createdAt,
@@ -209,10 +273,15 @@ class UserModel {
 }
 
 /// Moderation state of an account. Missing on older docs → active.
+///
+/// `onHold` is fee-hold ONLY (unpaid platform fees): unlike suspended/banned
+/// it never blocks sign-in — it only blocks posting listings and accepting
+/// swaps until fees are paid.
 enum AccountStatus {
   active('active'),
   suspended('suspended'),
-  banned('banned');
+  banned('banned'),
+  onHold('on_hold');
 
   const AccountStatus(this.value);
 
@@ -225,10 +294,11 @@ enum AccountStatus {
       );
 }
 
-/// The role a user plays within SwidShop.
+/// The role a user plays within SwidShop: Customer, or Customer + Seller
+/// ("both"). There is no seller-only role any more — a stored legacy
+/// `'seller'` reads as [both] (see [legacySellerValue]).
 enum UserRole {
   customer('customer'),
-  seller('seller'),
   both('both'),
   admin('admin');
 
@@ -236,13 +306,24 @@ enum UserRole {
 
   final String value;
 
+  /// The retired seller-only role value still found on older docs.
+  static const String legacySellerValue = 'seller';
+
   static UserRole fromValue(String? value) {
+    if (value == legacySellerValue) return UserRole.both;
     return UserRole.values.firstWhere(
       (e) => e.value == value,
       orElse: () => UserRole.customer,
     );
   }
 
-  /// Seller or admin can post listings.
-  bool get canSell => this == UserRole.seller || this == UserRole.both || this == UserRole.admin;
+  /// Customer + Seller (or admin) can post listings.
+  bool get canSell => this == UserRole.both || this == UserRole.admin;
+
+  /// Human label for screens ("Customer + Seller" for both).
+  String get label => switch (this) {
+        UserRole.customer => 'Customer',
+        UserRole.both => 'Customer + Seller',
+        UserRole.admin => 'Admin',
+      };
 }

@@ -1,6 +1,11 @@
+import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/chat_message_model.dart';
@@ -9,6 +14,7 @@ import '../../models/notification_model.dart';
 import '../../models/transaction_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
+import '../../services/storage_service.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/type_badge.dart';
 import '../customer/activity_screen.dart';
@@ -36,6 +42,9 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
   late final Stream<List<ChatMessageModel>> _messages =
       _firestore.streamMessages(widget.transactionId);
   bool _sending = false;
+
+  /// 0..1 while a chat photo uploads; null otherwise.
+  double? _uploadProgress;
 
   /// Guards the one-time rating prompt per completed deal.
   String? _promptedFor;
@@ -73,6 +82,118 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  /// Picks a photo (camera or gallery), compresses it on-device, uploads
+  /// it to Cloudinary and sends it as a message. Any typed text goes along
+  /// as the caption.
+  Future<void> _sendPhoto(String uid) async {
+    if (_sending) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take a photo'),
+              onTap: () => Navigator.of(sheet).pop(ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Choose from gallery'),
+              onTap: () => Navigator.of(sheet).pop(ImageSource.gallery),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(source: source);
+    } catch (e) {
+      debugPrint('pickChatPhoto: $e');
+      return;
+    }
+    if (picked == null || !mounted) return;
+    setState(() {
+      _sending = true;
+      _uploadProgress = 0;
+    });
+    final caption = _textCtrl.text.trim();
+    try {
+      final file = await StorageService.compressForUpload(File(picked.path));
+      final url = await StorageService().uploadImage(
+        file,
+        folder: AppConstants.chatFolder(widget.transactionId),
+        onProgress: (p) {
+          if (mounted) setState(() => _uploadProgress = p);
+        },
+      );
+      await _firestore.sendMessage(
+        widget.transactionId,
+        ChatMessageModel(senderId: uid, text: caption, imageUrl: url),
+      );
+      _textCtrl.clear();
+      // ignore: unawaited_futures
+      _notifyMessage(uid, caption.isEmpty ? '📷 Photo' : '📷 $caption');
+    } catch (e) {
+      debugPrint('sendPhoto: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              e is StorageException
+                  ? 'Photo upload failed: ${e.message}'
+                  : 'Photo not sent. Try again.',
+            ),
+            backgroundColor: AppColors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _uploadProgress = null;
+        });
+      }
+    }
+  }
+
+  void _openPhoto(String url) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            foregroundColor: Colors.white,
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              maxScale: 4,
+              child: CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.contain,
+                placeholder: (_, _) =>
+                    const CircularProgressIndicator(color: Colors.white),
+                errorWidget: (_, _, _) => const Icon(
+                  Icons.broken_image_outlined,
+                  color: Colors.white54,
+                  size: 48,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// Notifies the counterparty of a new message (in-app; mirrored as FCM
@@ -117,7 +238,12 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
     );
     if (ok != true) return;
     try {
-      await _firestore.updateTransactionStatus(widget.transactionId, status);
+      if (status == TransactionStatus.cancelled) {
+        // Cancelling also voids the platform fee (swaps stay 'none').
+        await _firestore.cancelTransaction(widget.transactionId);
+      } else {
+        await _firestore.updateTransactionStatus(widget.transactionId, status);
+      }
     } catch (e) {
       debugPrint('updateTransactionStatus: $e');
     }
@@ -407,17 +533,10 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
         await RateSheet.alreadyRated(txn.transactionId, uid);
     if (!mounted) return;
     if (!rated) {
-      await showModalBottomSheet<void>(
-        context: context,
-        backgroundColor: AppColors.surface,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        builder: (_) => RateSheet(
-          transactionId: txn.transactionId,
-          ratedUserId: otherId,
-          ratedName: '',
-        ),
+      await RateSheet.show(
+        context,
+        transactionId: txn.transactionId,
+        ratedUserId: otherId,
       );
       return;
     }
@@ -477,18 +596,10 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
         return SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
-            onPressed: () => showModalBottomSheet<void>(
-              context: context,
-              backgroundColor: AppColors.surface,
-              shape: const RoundedRectangleBorder(
-                borderRadius:
-                    BorderRadius.vertical(top: Radius.circular(20)),
-              ),
-              builder: (_) => RateSheet(
-                transactionId: txn.transactionId,
-                ratedUserId: otherId,
-                ratedName: '',
-              ),
+            onPressed: () => RateSheet.show(
+              context,
+              transactionId: txn.transactionId,
+              ratedUserId: otherId,
             ),
             icon: const Icon(Icons.star_outline),
             label: const Text('Rate this deal'),
@@ -576,13 +687,42 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(
-                      m.text,
-                      style: TextStyle(
-                        color: mine ? Colors.white : AppColors.ink,
-                        height: 1.35,
+                    if (m.hasImage)
+                      GestureDetector(
+                        onTap: () => _openPhoto(m.imageUrl),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: CachedNetworkImage(
+                            imageUrl: m.imageUrl,
+                            width: 220,
+                            height: 220,
+                            fit: BoxFit.cover,
+                            placeholder: (_, _) => Container(
+                              width: 220,
+                              height: 220,
+                              color: AppColors.cream,
+                            ),
+                            errorWidget: (_, _, _) => const SizedBox(
+                              width: 220,
+                              height: 120,
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: AppColors.gray,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                    if (m.hasImage && m.text.isNotEmpty)
+                      const SizedBox(height: 6),
+                    if (m.text.isNotEmpty)
+                      Text(
+                        m.text,
+                        style: TextStyle(
+                          color: mine ? Colors.white : AppColors.ink,
+                          height: 1.35,
+                        ),
+                      ),
                     const SizedBox(height: 3),
                     Text(
                       m.timestamp == null
@@ -612,6 +752,24 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       ),
       child: Row(
         children: [
+          IconButton(
+            tooltip: 'Send a photo',
+            onPressed: enabled && !_sending ? () => _sendPhoto(uid) : null,
+            icon: _uploadProgress != null
+                ? SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      value: _uploadProgress! > 0 ? _uploadProgress : null,
+                      color: AppColors.coral,
+                    ),
+                  )
+                : const Icon(
+                    Icons.add_photo_alternate_outlined,
+                    color: AppColors.coral,
+                  ),
+          ),
           Expanded(
             child: TextField(
               controller: _textCtrl,

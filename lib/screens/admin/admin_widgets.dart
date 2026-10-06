@@ -436,14 +436,17 @@ Color accountStatusColor(AccountStatus s) => switch (s) {
   AccountStatus.active => AppColors.green,
   AccountStatus.suspended => AppColors.amber,
   AccountStatus.banned => AppColors.red,
+  AccountStatus.onHold => AppColors.red,
 };
 
-String roleLabel(UserRole r) => switch (r) {
-  UserRole.customer => 'Customer',
-  UserRole.seller => 'Seller',
-  UserRole.both => 'Buyer & Seller',
-  UserRole.admin => 'Admin',
+String accountStatusLabel(AccountStatus s) => switch (s) {
+  AccountStatus.active => 'Active',
+  AccountStatus.suspended => 'Suspended',
+  AccountStatus.banned => 'Banned',
+  AccountStatus.onHold => 'On hold',
 };
+
+String roleLabel(UserRole r) => r.label;
 
 Color typeColor(ListingType t) => switch (t) {
   ListingType.buyNow => AppColors.coral,

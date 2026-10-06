@@ -302,7 +302,12 @@ void openNotificationTarget(
     case NotificationType.rating:
       next = const ProfileScreen();
     case NotificationType.system:
-      break;
+      // Role-change decisions open Profile (role + request status);
+      // auction end-time changes open the listing.
+      if (link.kind == 'role') next = const ProfileScreen();
+      if (link.kind == 'listing' && link.id.isNotEmpty) {
+        next = ListingDetailScreen(listingId: link.id);
+      }
   }
   // Sellers tapping a listing link land on the auction monitor instead.
   if (next is ListingDetailScreen &&

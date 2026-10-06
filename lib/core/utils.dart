@@ -35,7 +35,22 @@ class AppUtils {
     final minutes = diff.inMinutes % 60;
     if (days > 0) return '${days}d ${hours}h left';
     if (hours > 0) return '${hours}h ${minutes}m left';
-    return '${minutes}m left';
+    if (minutes > 0) return '${minutes}m left';
+    return '${diff.inSeconds}s left';
+  }
+
+  /// Compact length, e.g. `10 min`, `1 h 30 min`, `3 days`, `1 day 6 h`.
+  static String formatDuration(Duration d) {
+    if (d.isNegative) d = Duration.zero;
+    final days = d.inDays;
+    final hours = d.inHours % 24;
+    final minutes = d.inMinutes % 60;
+    final parts = <String>[
+      if (days > 0) '$days day${days == 1 ? '' : 's'}',
+      if (hours > 0) '$hours h',
+      if (minutes > 0) '$minutes min',
+    ];
+    return parts.isEmpty ? '0 min' : parts.join(' ');
   }
 
   /// Live countdown text, e.g. `2d 04:12:09`, `04:12:09`, or `00:00:00`.

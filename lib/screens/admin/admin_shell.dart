@@ -8,10 +8,13 @@ import '../../services/firestore_service.dart';
 import '../auth/role_home.dart';
 import 'admin_categories_screen.dart';
 import 'admin_dashboard_screen.dart';
+import 'admin_fees_screen.dart';
+import 'admin_ads_screen.dart';
 import 'admin_gate.dart';
 import 'admin_listings_screen.dart';
 import 'admin_ratings_screen.dart';
 import 'admin_reports_screen.dart';
+import 'admin_role_requests_screen.dart';
 import 'admin_transactions_screen.dart';
 import 'admin_users_screen.dart';
 import 'admin_widgets.dart';
@@ -25,7 +28,8 @@ enum AdminSection {
   orders('Transactions'),
   reports('Reports'),
   ratings('Ratings & Reviews'),
-  categories('Categories');
+  categories('Categories'),
+  roleRequests('Role Requests');
 
   const AdminSection(this.title);
 
@@ -95,6 +99,7 @@ class _AdminFrameState extends State<_AdminFrame> {
     AdminSection.reports => const AdminReportsScreen(),
     AdminSection.ratings => const AdminRatingsScreen(),
     AdminSection.categories => const AdminCategoriesScreen(),
+    AdminSection.roleRequests => const AdminRoleRequestsScreen(),
   };
 
   @override
@@ -198,94 +203,6 @@ class _AdminFrameState extends State<_AdminFrame> {
                     _built.contains(s) ? _page(s) : const SizedBox.shrink(),
                 ],
               ),
-        bottomNavigationBar: _bottomBar(queue),
-      ),
-    );
-  }
-
-  Widget _bottomBar(int queue) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border(top: BorderSide(color: AppColors.line)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 66,
-          child: Row(
-            children: [
-              _navItem(
-                AdminSection.dashboard,
-                Icons.space_dashboard_outlined,
-                Icons.space_dashboard,
-                'Admin',
-              ),
-              _navItem(
-                AdminSection.users,
-                Icons.people_outline,
-                Icons.people,
-                'Users',
-              ),
-              _navItem(
-                AdminSection.listings,
-                Icons.inventory_2_outlined,
-                Icons.inventory_2,
-                'Listings',
-              ),
-              _navItem(
-                AdminSection.orders,
-                Icons.receipt_long_outlined,
-                Icons.receipt_long,
-                'Orders',
-              ),
-              _navItem(
-                AdminSection.reports,
-                Icons.outlined_flag,
-                Icons.flag,
-                'Reports',
-                badge: queue,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _navItem(
-    AdminSection s,
-    IconData icon,
-    IconData activeIcon,
-    String label, {
-    int badge = 0,
-  }) {
-    final selected = _section == s;
-    final color = selected ? AppColors.coralDeep : AppColors.gray;
-    return Expanded(
-      child: InkResponse(
-        onTap: () => _select(s),
-        radius: 36,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Badge(
-              isLabelVisible: badge > 0,
-              backgroundColor: AppColors.red,
-              label: Text(badge > 9 ? '9+' : '$badge'),
-              child: Icon(selected ? activeIcon : icon, color: color),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: color,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -382,6 +299,57 @@ class _AdminFrameState extends State<_AdminFrame> {
               count: admin.pendingRatingFlags,
             ),
             item(AdminSection.categories, Icons.category_outlined),
+            item(
+              AdminSection.roleRequests,
+              Icons.manage_accounts_outlined,
+              count: admin.pendingRoleRequests,
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+              child: ListTile(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                leading: const Icon(
+                  Icons.payments_outlined,
+                  color: AppColors.ink,
+                ),
+                title: const Text(
+                  'Fees',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.ink,
+                  ),
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  openAdminFees(context);
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+              child: ListTile(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                leading: const Icon(
+                  Icons.campaign_outlined,
+                  color: AppColors.ink,
+                ),
+                title: const Text(
+                  'Manage Ads',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.ink,
+                  ),
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  openAdminAds(context);
+                },
+              ),
+            ),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
               child: Divider(color: AppColors.line),

@@ -50,7 +50,7 @@ class _TrustedSellersScreenState extends State<TrustedSellersScreen> {
           }
           // Badge + seller role only; sort already applied service-side.
           final sellers = (snap.data ?? const <UserModel>[])
-              .where((u) => u.role == UserRole.seller || u.role == UserRole.both)
+              .where((u) => u.role == UserRole.both)
               .toList();
           if (sellers.isEmpty) {
             return const Center(
@@ -199,7 +199,7 @@ class _PreviewRow extends StatelessWidget {
       stream: FirestoreService().streamSellerListings(sellerId),
       builder: (context, snap) {
         final items = (snap.data ?? const <ListingModel>[])
-            .where((l) => l.status == ListingStatus.active)
+            .where((l) => l.status == ListingStatus.active && !l.hidden)
             .take(3)
             .toList();
         if (items.isEmpty) {

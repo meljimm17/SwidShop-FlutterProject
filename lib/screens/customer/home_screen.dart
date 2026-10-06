@@ -20,6 +20,7 @@ import 'listing_detail_screen.dart';
 import 'notifications_screen.dart';
 import 'profile_screen.dart';
 import 'search_filter_screen.dart';
+import 'sponsored_carousel.dart';
 import 'trusted_sellers_screen.dart';
 
 /// Customer home feed of active listings.
@@ -46,7 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final isGuest = auth.isGuest;
     final uid = auth.firebaseUser?.uid ?? '';
     final canSell = !isGuest && (auth.profile?.role.canSell ?? false);
-    // A seller-only account reached Home from its Seller Centre.
+    // Home was pushed on top of another screen (show a back button).
     final fromSellerCentre = Navigator.of(context).canPop();
 
     Widget scaffold(int unread) {
@@ -96,6 +97,8 @@ class _HomeScreenState extends State<HomeScreen> {
             if (isGuest) _guestBanner(context),
             _greeting(auth),
             _searchBar(context),
+            const SponsoredCarousel(),
+            const PartnerAdSlot(),
             _quickAccess(context),
             Expanded(
               child: RefreshIndicator(
@@ -179,8 +182,7 @@ class _HomeScreenState extends State<HomeScreen> {
       stream: FirestoreService().streamTrustedUsers(),
       builder: (context, snap) {
         final sellers = (snap.data ?? const <UserModel>[])
-            .where((u) =>
-                u.role == UserRole.seller || u.role == UserRole.both)
+            .where((u) => u.role == UserRole.both)
             .take(10)
             .toList();
         if (sellers.isEmpty) return const SizedBox.shrink();
@@ -445,71 +447,132 @@ class ListingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final image = listing.images.isNotEmpty ? listing.images.first : null;
+    final featured = listing.isFeatured;
+    final hot = listing.isHighlighted;
     return AppCardWrapper(
       padding: EdgeInsets.zero,
+      // Pro Highlight: coral border (+ Hot tag below).
+      border: hot ? Border.all(color: AppColors.coral, width: 2) : null,
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ListingDetailScreen(listingId: listing.listingId),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
+      // In a fixed-size grid cell the photo flexes to whatever height is
+      // left after the text (no overflow at large system font sizes); in an
+      // unbounded list it keeps its 1.1 aspect ratio.
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final bounded = c.hasBoundedHeight;
+          final photo = ClipRRect(
             borderRadius: const BorderRadius.vertical(
               top: Radius.circular(AppTheme.cardRadius),
             ),
-            child: AspectRatio(
-              aspectRatio: 1.1,
-              child: image == null
-                  ? Container(
-                      color: AppColors.cream,
-                      child: const Icon(Icons.image_outlined,
-                          color: AppColors.gray, size: 40),
-                    )
-                  : CachedNetworkImage(
-                      imageUrl: image,
-                      fit: BoxFit.cover,
-                      placeholder: (_, _) =>
-                          Container(color: AppColors.cream),
-                      errorWidget: (_, _, _) => const Icon(
-                        Icons.broken_image_outlined,
-                        color: AppColors.gray,
+            child: image == null
+                ? Container(
+                    color: AppColors.cream,
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.image_outlined,
+                        color: AppColors.gray, size: 40),
+                  )
+                : CachedNetworkImage(
+                    imageUrl: image,
+                    fit: BoxFit.cover,
+                    width: double.infinity,
+                    placeholder: (_, _) => Container(color: AppColors.cream),
+                    errorWidget: (_, _, _) => const Icon(
+                      Icons.broken_image_outlined,
+                      color: AppColors.gray,
+                    ),
+                  ),
+          );
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: bounded ? MainAxisSize.max : MainAxisSize.min,
+            children: [
+              if (bounded)
+                Expanded(child: photo)
+              else
+                AspectRatio(aspectRatio: 1.1, child: photo),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      listing.title,
+                      maxLines: bounded ? 1 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
                       ),
                     ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  listing.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
-                  ),
+                    const SizedBox(height: 6),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: Row(
+                        children: [
+                          TypeBadge(listing.type),
+                          if (hot) ...[
+                            const SizedBox(width: 6),
+                            const PromoTag('HOT', color: AppColors.coral),
+                          ],
+                          if (featured) ...[
+                            const SizedBox(width: 6),
+                            const PromoTag('FEATURED', color: AppColors.amber),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      listing.type == ListingType.swap && listing.price == null
+                          ? 'Swap'
+                          : AppUtils.formatCurrency(listing.displayPrice),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.coral,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 6),
-                TypeBadge(listing.type),
-                const SizedBox(height: 6),
-                Text(
-                  listing.type == ListingType.swap && listing.price == null
-                      ? 'Swap'
-                      : AppUtils.formatCurrency(listing.displayPrice),
-                  style: const TextStyle(
-                    color: AppColors.coral,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Small filled pill for feed promos (HOT / FEATURED / SPONSORED).
+class PromoTag extends StatelessWidget {
+  const PromoTag(this.label, {super.key, this.color = AppColors.coral});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
       ),
     );
   }

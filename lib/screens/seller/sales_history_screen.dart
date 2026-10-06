@@ -10,6 +10,7 @@ import '../../providers/seller_provider.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/monthly_bars.dart';
 import '../shared/transaction_chat_screen.dart';
+import 'fee_payments.dart';
 
 /// Completed sales across Buy Now, Auction wins and Swaps. The header
 /// totals always match the rows currently shown; each row opens the chat.
@@ -423,6 +424,10 @@ class _SettlementCard extends StatelessWidget {
                             ],
                           ),
                         ),
+                        if (t.feeStatus != 'none') ...[
+                          const SizedBox(height: 6),
+                          _feeLine(context, t),
+                        ],
                       ],
                     ),
                   ),
@@ -437,6 +442,47 @@ class _SettlementCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  /// "Platform fee 5%: ₱50 · Unpaid, due Oct 12" (+ inline Pay Now).
+  Widget _feeLine(BuildContext context, TransactionModel t) {
+    final state = t.feeStatus == 'paid'
+        ? 'Paid'
+        : t.feeStatus == 'void'
+            ? 'Void'
+            : t.feeOverdue
+                ? 'Overdue'
+                : 'Unpaid${t.feeDueAt == null ? '' : ', due ${AppUtils.formatDate(t.feeDueAt)}'}';
+    final color = t.feeStatus == 'paid'
+        ? AppColors.green
+        : t.feeOverdue
+            ? AppColors.red
+            : AppColors.amber;
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            'Platform fee ${(t.feeRate * 100).toStringAsFixed(0)}%: '
+            '${AppUtils.formatCurrency(t.feeAmount)} · $state',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ),
+        if (t.feeUnpaid)
+          TextButton(
+            onPressed: () => payOneFee(context, t),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('Pay Now'),
+          ),
+      ],
     );
   }
 }

@@ -440,6 +440,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
           completedTransactions: existing?.completedTransactions ?? 0,
           completionRate: existing?.completionRate ?? 0,
           trustedBadge: existing?.trustedBadge ?? false,
+          // Full overwrite: carry server-managed state over unchanged.
+          accountStatus: existing?.accountStatus ?? AccountStatus.active,
+          plan: existing?.plan ?? 'free',
+          planUntil: existing?.planUntil,
+          boostedUntil: existing?.boostedUntil,
+          favorites: existing?.favorites ?? const [],
+          following: existing?.following ?? const [],
           profileComplete: true,
           createdAt: existing?.createdAt ?? DateTime.now(),
         ),
@@ -801,21 +808,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
         option(
           UserRole.customer,
           Icons.shopping_bag_outlined,
-          'I want to buy',
-          'Browse listings, place bids, and send swap offers.',
-        ),
-        option(
-          UserRole.seller,
-          Icons.storefront_outlined,
-          'I want to sell',
-          'Post items for a fixed price, an auction, or a swap, and '
-              'manage them from your dashboard.',
+          'Customer',
+          'Browse listings, place bids, buy, and send swap offers.',
         ),
         option(
           UserRole.both,
-          Icons.swap_horiz_rounded,
-          'Both',
-          'Buy, sell, and swap from one account.',
+          Icons.storefront_outlined,
+          'Customer + Seller',
+          'Everything a customer can do, plus your own shop: post items '
+              'for a fixed price, an auction, or a swap.',
         ),
       ],
     );

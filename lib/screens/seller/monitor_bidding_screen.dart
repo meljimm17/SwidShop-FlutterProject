@@ -6,12 +6,15 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import '../../core/theme.dart';
 import '../../core/utils.dart';
+import '../../core/constants.dart';
 import '../../models/bid_model.dart';
 import '../../models/listing_model.dart';
+import '../../models/transaction_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/seller_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
+import 'auction_time_sheet.dart';
 import '../../widgets/primary_button.dart';
 import '../shared/transaction_chat_screen.dart';
 
@@ -310,6 +313,19 @@ class _MonitorBiddingScreenState extends State<MonitorBiddingScreen> {
               ? _settledPanel(l, top)
               : _livePanel(remaining, highest, bidders),
         ),
+        if (!ended) ...[
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: () => showChangeAuctionEndSheet(context, l),
+            icon: const Icon(Icons.more_time_rounded),
+            label: const Text('Change end time'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.ink,
+              side: const BorderSide(color: AppColors.line),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
         Row(
           children: [
@@ -529,6 +545,8 @@ class _MonitorBiddingScreenState extends State<MonitorBiddingScreen> {
               color: AppColors.coral,
             ),
           ),
+          const SizedBox(height: 6),
+          _feeLine(l, top.amount),
           const SizedBox(height: 14),
           PrimaryButton(
             label: 'Message winner',
@@ -538,6 +556,50 @@ class _MonitorBiddingScreenState extends State<MonitorBiddingScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Platform fee line: stamped values from the deal when known, else the
+  /// current plan-rate estimate (demo ledger — buyer paid you directly).
+  Widget _feeLine(ListingModel l, double hammer) {
+    final txnId = _txnId;
+    if (txnId == null) {
+      final rate = context.select<AuthProvider, double>(
+        (a) => Fees.rateFor(a.profile?.effectivePlan ?? 'free'),
+      );
+      return Text(
+        'Platform fee ${(rate * 100).toStringAsFixed(0)}%: '
+        '${AppUtils.formatCurrency(hammer * rate)} — unpaid',
+        style: const TextStyle(fontSize: 12.5, color: AppColors.gray),
+      );
+    }
+    return StreamBuilder<TransactionModel?>(
+      stream: _firestore.streamTransaction(txnId),
+      builder: (context, snap) {
+        final txn = snap.data;
+        if (txn == null || txn.feeStatus == 'none') {
+          return const SizedBox.shrink();
+        }
+        final state = txn.feeStatus == 'paid'
+            ? 'Paid'
+            : txn.feeOverdue
+                ? 'Overdue'
+                : 'Unpaid${txn.feeDueAt == null ? '' : ', due ${AppUtils.formatDate(txn.feeDueAt)}'}';
+        return Text(
+          'Platform fee ${(txn.feeRate * 100).toStringAsFixed(0)}%: '
+          '${AppUtils.formatCurrency(txn.feeAmount)} — $state',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+            color: txn.feeStatus == 'paid'
+                ? AppColors.green
+                : txn.feeOverdue
+                    ? AppColors.red
+                    : AppColors.amber,
+          ),
+        );
+      },
     );
   }
 }

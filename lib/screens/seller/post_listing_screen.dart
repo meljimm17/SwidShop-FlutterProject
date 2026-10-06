@@ -6,14 +6,19 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/category_model.dart';
 import '../../models/listing_model.dart';
+import '../../models/user_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../services/storage_service.dart';
 import '../../widgets/auth_widgets.dart';
+import '../../widgets/duration_picker.dart';
+import 'boost_sheet.dart';
+import 'plans_screen.dart';
 
 /// Create (or edit, via [existing]) a Bid, Swap or Buy Now listing.
 ///
@@ -48,10 +53,10 @@ const List<String> kConditions = [
   'Distressed',
 ];
 
-/// Auction lengths in days (1 = 24h).
-const List<int> kAuctionDays = [1, 3, 5, 7];
+/// Auction length presets live in [AppConstants.auctionPresets] (+ Pro
+/// extras); "Custom" picks any length from
+/// [AppConstants.minAuctionDuration] up to the plan maximum.
 const List<double> kBidSteps = [50, 100, 250];
-const int kMaxPhotos = 8;
 
 class _PhotoSlot {
   _PhotoSlot.file(this.file) : url = null;
@@ -91,8 +96,54 @@ class _PostListingScreenState extends State<PostListingScreen> {
   String? _condition;
   double _bidStep = 100;
   List<double> _bidSteps = [...kBidSteps];
-  int _auctionDays = 3;
+  Duration _auctionLength = const Duration(days: 3);
   bool _durationTouched = false;
+
+  /// The seller's plan right now (a lapsed plan counts as free).
+  String _plan() =>
+      context.read<AuthProvider>().profile?.effectivePlan ?? 'free';
+
+  /// Longer auctions, Buy It Now on auctions: Pro perks.
+  bool _isPro() => _plan() == 'pro';
+
+  List<Duration> _auctionPresets() => [
+        ...AppConstants.auctionPresets,
+        if (_isPro()) ...AppConstants.proAuctionPresets,
+      ];
+
+  /// Short chip label: 10m, 30m, 1h, 6h, 24h, 3d…
+  static String _presetLabel(Duration d) {
+    if (d.inDays >= 2) return '${d.inDays}d';
+    if (d.inHours >= 1) return '${d.inHours}h';
+    return '${d.inMinutes}m';
+  }
+
+  Future<void> _customLength() async {
+    final picked = await showDurationPicker(
+      context,
+      initial: _auctionLength,
+      min: AppConstants.minAuctionDuration,
+      max: AppConstants.maxAuctionDuration(_plan()),
+      helper: 'From ${AppUtils.formatDuration(AppConstants.minAuctionDuration)} '
+          'up to ${AppUtils.formatDuration(AppConstants.maxAuctionDuration(_plan()))}'
+          '${_isPro() ? '' : ' (Pro: ${AppConstants.maxProAuctionDays} days)'}.',
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _auctionLength = picked;
+        _durationTouched = true;
+      });
+    }
+  }
+
+  /// Pro add-on: instant-buy price on Bidding listings.
+  bool _buyNowOn = false;
+  final _buyNowPriceCtrl = TextEditingController();
+
+  /// Reserved id for a brand-new listing (photos + pack buy before submit).
+  String? _draftId;
+  String get _targetId =>
+      widget.existing?.listingId ?? (_draftId ??= _firestore.newListingId());
   bool _reserveOn = false;
   bool _swapOnly = true;
   final Set<String> _delivery = {};
@@ -140,6 +191,10 @@ class _PostListingScreenState extends State<PostListingScreen> {
           _reserveOn = true;
           _reserveCtrl.text = num(l.reservePrice);
         }
+        if (l.buyNowPrice != null) {
+          _buyNowOn = true;
+          _buyNowPriceCtrl.text = num(l.buyNowPrice);
+        }
       case ListingType.swap:
         _wantsCtrl.text = l.swapWants;
         _swapOnly = l.swapOnly;
@@ -161,6 +216,7 @@ class _PostListingScreenState extends State<PostListingScreen> {
       _priceCtrl,
       _startBidCtrl,
       _reserveCtrl,
+      _buyNowPriceCtrl,
       _wantsCtrl,
       _swapPriceCtrl,
       _meetupCtrl,
@@ -174,9 +230,99 @@ class _PostListingScreenState extends State<PostListingScreen> {
   // Photos
   // ---------------------------------------------------------------------------
 
+  /// Photo Pack bought in this session (the listing may not exist yet).
+  bool _photoPackBought = false;
+
+  int? _packLimit() => _photoPackBought
+      ? AppConstants.photoLimits['pack']
+      : widget.existing?.photoLimit;
+
+  /// Photos allowed here: plan limit or Photo Pack, whichever is larger.
+  int _photoLimit() => ListingModel.photoCapOf(_plan(), _packLimit());
+
+  /// Below Pro's limit there is always an upgrade path.
+  bool _canUnlockMorePhotos() =>
+      _photoLimit() < AppConstants.photoLimits['pro']!;
+
+  /// At the cap: a free listing without a pack gets the Photo Pack /
+  /// See Plans sheet; anyone else gets the Pro upgrade prompt.
+  Future<void> _unlockMorePhotos() async {
+    final hasPack = (_packLimit() ?? 0) >= AppConstants.photoLimits['pack']!;
+    if (_plan() == 'free' && !hasPack) {
+      await _photoUpgradeSheet();
+    } else {
+      await showUpgradePrompt(
+        context,
+        feature: 'Up to ${AppConstants.photoLimits['pro']} photos per listing',
+      );
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// "Unlock more photos for this listing" (one-time pack) or See Plans.
+  Future<void> _photoUpgradeSheet() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 8, 20, 4),
+              child: Text(
+                'You\u2019ve hit 3 photos (Free plan). Unlock more photos for this listing, or see plans for 8–15 on everything.',
+                style: TextStyle(height: 1.45),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_library_outlined,
+                color: AppColors.coral,
+              ),
+              title: Text(
+                'Unlock more photos for this listing — ${AppUtils.formatCurrency(AppConstants.photoPackPrice)} once',
+              ),
+              onTap: () => Navigator.of(sheetContext).pop('pack'),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.workspace_premium_outlined,
+                color: AppColors.teal,
+              ),
+              title: const Text('See Plans'),
+              onTap: () => Navigator.of(sheetContext).pop('plans'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (action == 'plans' && mounted) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const PlansScreen()),
+      );
+    } else if (action == 'pack' && mounted) {
+      final ok = await buyPhotoPack(
+        context,
+        listingId: _targetId,
+        title: _titleCtrl.text.trim().isEmpty
+            ? 'this listing'
+            : _titleCtrl.text.trim(),
+      );
+      if (ok && mounted) setState(() => _photoPackBought = true);
+    }
+  }
+
   Future<void> _addPhotos() async {
-    final remaining = kMaxPhotos - _photos.length;
-    if (remaining <= 0) return;
+    final limit = _photoLimit();
+    final remaining = limit - _photos.length;
+    // At the cap (e.g. a free seller's 4th photo): upgrade routes.
+    if (remaining <= 0) {
+      if (_canUnlockMorePhotos()) await _unlockMorePhotos();
+      return;
+    }
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       backgroundColor: AppColors.surface,
@@ -300,10 +446,55 @@ class _PostListingScreenState extends State<PostListingScreen> {
     if (_editing) return 'Save changes';
     return switch (_type) {
       ListingType.bid =>
-        'Publish ${_auctionDays == 1 ? '24-Hour' : '$_auctionDays-Day'} Auction',
+        'Publish ${AppUtils.formatDuration(_auctionLength)} Auction',
       ListingType.swap => 'Publish Swap Listing',
       ListingType.buyNow => 'Publish Buy Now Listing',
     };
+  }
+
+  /// First plan-limit problem with the form, or null. Unchanged values on
+  /// an edited listing are kept even if the plan has since lapsed.
+  String? _planLimitError() {
+    final existing = widget.existing;
+    final photosChanged = existing == null ||
+        _photos.length != existing.images.length ||
+        _photos.any((p) => p.url == null || !existing.images.contains(p.url));
+    if (photosChanged && _photos.length > _photoLimit()) {
+      return 'Your plan allows ${_photoLimit()} photos here — remove '
+          '${_photos.length - _photoLimit()} or upgrade.';
+    }
+    if (_type != ListingType.bid) return null;
+    final keepOldEnd = existing?.type == ListingType.bid &&
+        existing?.auctionEndAt != null &&
+        !_durationTouched;
+    if (!keepOldEnd) {
+      if (_auctionLength < AppConstants.minAuctionDuration) {
+        return 'Auctions must run at least '
+            '${AppUtils.formatDuration(AppConstants.minAuctionDuration)}.';
+      }
+      if (_auctionLength > AppConstants.maxAuctionDuration(_plan())) {
+        return _isPro()
+            ? 'Auctions can run at most ${AppConstants.maxProAuctionDays} days.'
+            : 'Auctions longer than ${AppConstants.maxAuctionDays} days are a '
+                'Pro feature.';
+      }
+    }
+    if (_buyNowOn) {
+      final bin = _num(_buyNowPriceCtrl) ?? 0;
+      final binChanged = existing?.buyNowPrice != bin;
+      if (binChanged && !_isPro()) {
+        return 'Buy It Now on auctions is a Pro feature.';
+      }
+      final start = _num(_startBidCtrl) ?? 0;
+      if (bin <= start) {
+        return 'Buy It Now price must be higher than the starting bid.';
+      }
+      final reserve = _reserveOn ? (_num(_reserveCtrl) ?? 0) : 0;
+      if (bin < reserve) {
+        return 'Buy It Now price cannot be below your reserve price.';
+      }
+    }
+    return null;
   }
 
   Future<void> _submit() async {
@@ -325,10 +516,35 @@ class _PostListingScreenState extends State<PostListingScreen> {
     final uid = context.read<AuthProvider>().firebaseUser?.uid;
     if (uid == null) return;
 
+    // Plan limits (also enforced by the Firestore rules).
+    final planError = _planLimitError();
+    if (planError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(planError), backgroundColor: AppColors.red),
+      );
+      return;
+    }
+
+    // Fee hold: blocked from posting until fees are paid (login/chat work).
+    final hold =
+        context.read<AuthProvider>().profile?.accountStatus ==
+            AccountStatus.onHold;
+    if (hold && widget.existing == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Your shop is on hold over unpaid fees — pay them from the Seller Dashboard to post again.',
+          ),
+          backgroundColor: AppColors.red,
+        ),
+      );
+      return;
+    }
+
     setState(() => _busy = true);
     try {
       final existing = widget.existing;
-      final listingId = existing?.listingId ?? _firestore.newListingId();
+      final listingId = _targetId;
       await _uploadPending(listingId);
       final images = _photos.map((s) => s.url!).toList();
 
@@ -341,7 +557,7 @@ class _PostListingScreenState extends State<PostListingScreen> {
             !_durationTouched;
         auctionEndAt = keepOld
             ? existing!.auctionEndAt
-            : DateTime.now().add(Duration(days: _auctionDays));
+            : DateTime.now().add(_auctionLength);
       }
 
       final listing = ListingModel(
@@ -376,6 +592,11 @@ class _PostListingScreenState extends State<PostListingScreen> {
         swapWants: _type == ListingType.swap ? _wantsCtrl.text.trim() : '',
         swapOnly: _type == ListingType.swap ? _swapOnly : true,
         status: ListingStatus.active,
+        photoLimit: _photoPackBought
+            ? AppConstants.photoLimits['pack']
+            : existing?.photoLimit,
+        buyNowPrice:
+            isBid && _buyNowOn ? _num(_buyNowPriceCtrl) : null,
       );
 
       if (existing == null) {
@@ -388,6 +609,7 @@ class _PostListingScreenState extends State<PostListingScreen> {
           ..remove('bidCount')
           ..remove('highestBidderId')
           ..remove('status');
+        if (!_photoPackBought) data.remove('photoLimit');
         await _firestore.updateListing(listingId, data);
       }
 
@@ -560,7 +782,7 @@ class _PostListingScreenState extends State<PostListingScreen> {
               ),
             ),
             Text(
-              '${_photos.length} / $kMaxPhotos added',
+              '${_photos.length} / ${_photoLimit()} added',
               style: const TextStyle(
                 fontSize: 12.5,
                 fontWeight: FontWeight.w700,
@@ -589,7 +811,8 @@ class _PostListingScreenState extends State<PostListingScreen> {
           )
         else
           LayoutBuilder(builder: (context, c) => _photoLayout(c.maxWidth)),
-        if (_photos.isNotEmpty && _photos.length < kMaxPhotos) ...[
+        if (_photos.isNotEmpty &&
+            (_photos.length < _photoLimit() || _canUnlockMorePhotos())) ...[
           const SizedBox(height: 10),
           Material(
             color: AppColors.mist.withValues(alpha: 0.7),
@@ -602,12 +825,21 @@ class _PostListingScreenState extends State<PostListingScreen> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.add_photo_alternate_outlined, size: 19),
+                    Icon(
+                      _photos.length < _photoLimit()
+                          ? Icons.add_photo_alternate_outlined
+                          : Icons.lock_outline,
+                      size: 19,
+                    ),
                     const SizedBox(width: 8),
-                    Text(
-                      'Add more angles or tag close-ups '
-                      '(+${kMaxPhotos - _photos.length})',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    Flexible(
+                      child: Text(
+                        _photos.length < _photoLimit()
+                            ? 'Add more angles or tag close-ups '
+                                '(+${_photoLimit() - _photos.length})'
+                            : 'Unlock more photos',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ],
                 ),
@@ -880,21 +1112,142 @@ class _PostListingScreenState extends State<PostListingScreen> {
             ? 'Ends ${AppUtils.formatDateTime(widget.existing!.auctionEndAt)}'
             : null,
       ),
-      Row(
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
         children: [
-          for (var i = 0; i < kAuctionDays.length; i++) ...[
-            if (i > 0) const SizedBox(width: 8),
-            choice(
-              kAuctionDays[i] == 1 ? '24h' : '${kAuctionDays[i]} Days',
-              _auctionDays == kAuctionDays[i],
-              () => setState(() {
-                _auctionDays = kAuctionDays[i];
-                _durationTouched = true;
-              }),
+          for (final d in _auctionPresets())
+            ChoiceChip(
+              label: Text(_presetLabel(d)),
+              selected: _durationTouched || !_editing
+                  ? _auctionLength == d
+                  : false,
+              showCheckmark: false,
+              onSelected: _busy
+                  ? null
+                  : (_) => setState(() {
+                        _auctionLength = d;
+                        _durationTouched = true;
+                      }),
+              selectedColor: AppColors.coralDeep,
+              backgroundColor: AppColors.cream,
+              labelStyle: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: _auctionLength == d &&
+                        (_durationTouched || !_editing)
+                    ? Colors.white
+                    : AppColors.ink,
+              ),
+              side: BorderSide.none,
+              shape: const StadiumBorder(),
             ),
-          ],
+          ActionChip(
+            avatar: const Icon(Icons.tune_rounded, size: 16),
+            label: Text(
+              _auctionPresets().contains(_auctionLength) ||
+                      (_editing && !_durationTouched)
+                  ? 'Custom'
+                  : 'Custom: ${AppUtils.formatDuration(_auctionLength)}',
+            ),
+            onPressed: _busy ? null : _customLength,
+            backgroundColor: !_auctionPresets().contains(_auctionLength) &&
+                    (_durationTouched || !_editing)
+                ? AppColors.coralDeep.withValues(alpha: 0.15)
+                : AppColors.cream,
+            side: BorderSide.none,
+            shape: const StadiumBorder(),
+          ),
         ],
       ),
+      const SizedBox(height: 6),
+      Text(
+        _editing && widget.existing?.auctionEndAt != null && !_durationTouched
+            ? 'Keeps the current end time unless you pick a new length.'
+            : 'Ends about ${AppUtils.formatDateTime(DateTime.now().add(_auctionLength))}. '
+                'You can still shorten or extend it while it runs.',
+        style: const TextStyle(fontSize: 12.5, color: AppColors.gray),
+      ),
+      if (!_isPro()) ...[
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Icon(Icons.lock_outline, size: 14, color: AppColors.gray),
+            const SizedBox(width: 6),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const PlansScreen()),
+                ),
+                child: const Text(
+                  'Auctions longer than 7 days (up to 14) are a Pro perk. '
+                  'See Plans.',
+                  style: TextStyle(fontSize: 12.5, color: AppColors.gray),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+      const SizedBox(height: 18),
+      Row(
+        children: [
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Buy It Now Price (Pro)',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+                Text(
+                  'End the auction instantly at this price',
+                  style: TextStyle(fontSize: 12.5, color: AppColors.gray),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: _buyNowOn,
+            onChanged: _busy
+                ? null
+                : (v) {
+                    if (v && !_isPro()) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Buy It Now on auctions is a Pro perk.',
+                          ),
+                        ),
+                      );
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const PlansScreen(),
+                        ),
+                      );
+                      return;
+                    }
+                    setState(() => _buyNowOn = v);
+                  },
+            activeThumbColor: Colors.white,
+            activeTrackColor: AppColors.teal,
+          ),
+        ],
+      ),
+      if (_buyNowOn) ...[
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _buyNowPriceCtrl,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          inputFormatters: [
+            FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+          ],
+          validator: (v) => Validators.positiveNumber(v, 'Buy It Now'),
+          decoration: const InputDecoration(
+            labelText: 'Buy It Now price',
+            prefixText: '₱ ',
+          ),
+        ),
+      ],
       const SizedBox(height: 16),
       Row(
         children: [

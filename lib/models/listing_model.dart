@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../core/constants.dart';
+
 /// How a listing can be acquired.
 enum ListingType {
   buyNow('buyNow'),
@@ -89,6 +91,12 @@ class ListingModel {
     this.swapOpen = false,
     this.swapWants = '',
     this.swapOnly = true,
+    this.photoLimit,
+    this.bumpedAt,
+    this.featuredUntil,
+    this.hidden = false,
+    this.buyNowPrice,
+    this.highlightUntil,
     this.status = ListingStatus.active,
     this.createdAt,
   });
@@ -141,6 +149,67 @@ class ListingModel {
   /// Swap only: true = trade only; false = a cash [price] is also accepted.
   final bool swapOnly;
 
+  /// Photo Pack unlock for this listing (8). Null = plan limit only.
+  final int? photoLimit;
+
+  /// Last Bump (Pro, once per [AppConstants.bumpCooldown]). The Home feed
+  /// orders by [feedTime], so a bump moves the listing back to the top.
+  final DateTime? bumpedAt;
+
+  /// Paid Featured window (Step 5): Sponsored carousel + "Featured" tag.
+  final DateTime? featuredUntil;
+
+  /// Hidden from customers while the seller is on fee hold.
+  /// Missing on older docs → visible.
+  final bool hidden;
+
+  /// Pro add-on: instant-buy price on Bidding listings (null = auction only).
+  final double? buyNowPrice;
+
+  /// Pro Highlight window: coral border + "Hot" tag. Separate from
+  /// [featuredUntil] so one never overwrites the other.
+  final DateTime? highlightUntil;
+
+  /// True while the paid feature window is still open.
+  bool get isFeatured =>
+      featuredUntil != null && featuredUntil!.isAfter(DateTime.now());
+
+  /// True while the Pro highlight window is still open.
+  bool get isHighlighted =>
+      highlightUntil != null && highlightUntil!.isAfter(DateTime.now());
+
+  /// Feed ordering key: the later of posting and the last Bump.
+  DateTime? get feedTime {
+    final b = bumpedAt;
+    final c = createdAt;
+    if (b == null) return c;
+    if (c == null) return b;
+    return b.isAfter(c) ? b : c;
+  }
+
+  /// Photos allowed on this listing for a seller on [effectivePlan]:
+  /// the larger of the plan limit and a bought Photo Pack.
+  int photoCap(String effectivePlan) =>
+      photoCapOf(effectivePlan, photoLimit);
+
+  static int photoCapOf(String effectivePlan, int? photoLimit) {
+    final planCap = AppConstants.photoLimits[effectivePlan] ??
+        AppConstants.photoLimits['free']!;
+    final pack = photoLimit ?? 0;
+    return pack > planCap ? pack : planCap;
+  }
+
+  /// Buy It Now on an auction is open while the auction runs and the bids
+  /// have not reached the instant price.
+  bool get buyItNowOpen {
+    final p = buyNowPrice;
+    if (type != ListingType.bid || p == null || p <= 0) return false;
+    if (status != ListingStatus.active) return false;
+    final end = auctionEndAt;
+    if (end != null && !end.isAfter(DateTime.now())) return false;
+    return (currentHighestBid ?? 0) < p;
+  }
+
   /// Price shown on cards / feed: current bid, fixed price, or swap cash price.
   double? get displayPrice =>
       type == ListingType.bid ? (currentHighestBid ?? startingBid) : price;
@@ -183,6 +252,12 @@ class ListingModel {
       swapOpen: map['swapOpen'] as bool? ?? false,
       swapWants: map['swapWants'] as String? ?? '',
       swapOnly: map['swapOnly'] as bool? ?? true,
+      photoLimit: (map['photoLimit'] as num?)?.toInt(),
+      bumpedAt: (map['bumpedAt'] as Timestamp?)?.toDate(),
+      featuredUntil: (map['featuredUntil'] as Timestamp?)?.toDate(),
+      hidden: map['hidden'] as bool? ?? false,
+      buyNowPrice: (map['buyNowPrice'] as num?)?.toDouble(),
+      highlightUntil: (map['highlightUntil'] as Timestamp?)?.toDate(),
       status: ListingStatus.fromValue(map['status'] as String?),
       createdAt: (map['createdAt'] as Timestamp?)?.toDate(),
     );
@@ -214,6 +289,12 @@ class ListingModel {
         'swapOpen': swapOpen,
         'swapWants': swapWants,
         'swapOnly': swapOnly,
+        // Paid/hold perks (bumpedAt, featuredUntil, highlightUntil, hidden)
+        // are deliberately NOT written here: they change only through the
+        // payment / perk / hold flows, so no full-listing write can wipe
+        // them.
+        'photoLimit': photoLimit,
+        'buyNowPrice': buyNowPrice,
         'status': status.value,
         'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
       };
@@ -243,6 +324,12 @@ class ListingModel {
     bool? swapOpen,
     String? swapWants,
     bool? swapOnly,
+    int? photoLimit,
+    DateTime? bumpedAt,
+    DateTime? featuredUntil,
+    bool? hidden,
+    double? buyNowPrice,
+    DateTime? highlightUntil,
     ListingStatus? status,
     DateTime? createdAt,
   }) =>
@@ -271,6 +358,12 @@ class ListingModel {
         swapOpen: swapOpen ?? this.swapOpen,
         swapWants: swapWants ?? this.swapWants,
         swapOnly: swapOnly ?? this.swapOnly,
+        photoLimit: photoLimit ?? this.photoLimit,
+        bumpedAt: bumpedAt ?? this.bumpedAt,
+        featuredUntil: featuredUntil ?? this.featuredUntil,
+        hidden: hidden ?? this.hidden,
+        buyNowPrice: buyNowPrice ?? this.buyNowPrice,
+        highlightUntil: highlightUntil ?? this.highlightUntil,
         status: status ?? this.status,
         createdAt: createdAt ?? this.createdAt,
       );

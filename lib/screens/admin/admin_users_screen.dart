@@ -44,6 +44,7 @@ Future<bool> setAccountStatusFlow(
       AccountStatus.active => 'Re-activate $name?',
       AccountStatus.suspended => 'Suspend $name?',
       AccountStatus.banned => 'Ban $name?',
+      AccountStatus.onHold => 'Hold $name over unpaid fees?',
     },
     message: status == AccountStatus.active
         ? 'They will be able to sign in again.'
@@ -53,6 +54,7 @@ Future<bool> setAccountStatusFlow(
       AccountStatus.active => 'Re-activate',
       AccountStatus.suspended => 'Suspend',
       AccountStatus.banned => 'Ban',
+      AccountStatus.onHold => 'Hold',
     },
     destructive: status != AccountStatus.active,
   );
@@ -100,9 +102,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     final a = context.watch<AdminProvider>();
     final roles = AdminStats.roleCounts(a.users);
     final flagged = a.flaggedUserIds;
-    final sellers = a.users.where(
-      (u) => u.role == UserRole.seller || u.role == UserRole.both,
-    );
+    final sellers = a.users.where((u) => u.role == UserRole.both);
     final activeSellers = sellers
         .where((u) => u.accountStatus == AccountStatus.active)
         .length;
@@ -158,8 +158,10 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
               UserRole.customer,
               'Customer (${roles[UserRole.customer]})',
             ),
-            PillOption(UserRole.seller, 'Seller (${roles[UserRole.seller]})'),
-            PillOption(UserRole.both, 'Both (${roles[UserRole.both]})'),
+            PillOption(
+              UserRole.both,
+              'Customer + Seller (${roles[UserRole.both]})',
+            ),
             PillOption(UserRole.admin, 'Admin (${roles[UserRole.admin]})'),
           ],
         ),
@@ -316,6 +318,7 @@ class _UserCard extends StatelessWidget {
         strikes > 0
             ? 'Banned ($strikes strike${strikes == 1 ? '' : 's'})'
             : 'Banned',
+      AccountStatus.onHold => 'On hold (unpaid fees)',
     };
 
     return AdminCard(

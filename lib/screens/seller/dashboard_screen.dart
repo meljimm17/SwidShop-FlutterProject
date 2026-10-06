@@ -11,7 +11,13 @@ import '../../providers/auth_provider.dart';
 import '../../providers/seller_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/listing_widgets.dart';
+import '../../widgets/plan_badge.dart';
+import '../../models/notification_model.dart';
+import '../customer/notifications_screen.dart';
 import 'analytics_screen.dart';
+import 'fee_payments.dart';
+import 'grow_my_shop_screen.dart';
+import 'plans_screen.dart';
 import 'monitor_bidding_screen.dart';
 import 'post_listing_screen.dart';
 import 'sales_history_screen.dart';
@@ -43,8 +49,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
   void _push(Widget screen) =>
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
 
-  Future<ListingModel?> _offeredItem(String id) =>
-      _offeredItems.putIfAbsent(id, () => FirestoreService().getListing(id));
+  Future<ListingModel?> _offeredItem(SwapOfferModel o) => _offeredItems
+      .putIfAbsent(o.offerId, () => FirestoreService().offeredItemFor(o));
 
   @override
   Widget build(BuildContext context) {
@@ -64,13 +70,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
         ),
         actions: [
-          IconButton(
-            tooltip: 'Notifications',
-            icon: const Icon(Icons.notifications_none_rounded),
-            onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Notifications coming soon')),
-            ),
-          ),
+          _NotificationsBell(uid: auth.firebaseUser?.uid ?? ''),
           Padding(
             padding: const EdgeInsets.only(right: 16, left: 4),
             child: GestureDetector(
@@ -83,6 +83,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
         children: [
+          _feeBanners(profile),
           _storeCard(profile),
           const SizedBox(height: 24),
           _sectionHeader(
@@ -115,6 +116,25 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
   // ---------------------------------------------------------------------------
   // Store card
   // ---------------------------------------------------------------------------
+
+  /// Fee hold + unpaid banners from live seller transactions.
+  Widget _feeBanners(UserModel? profile) {
+    final seller = context.watch<SellerProvider>();
+    final unpaid = unpaidFees(seller.transactions);
+    final onHold = profile?.accountStatus == AccountStatus.onHold;
+    if (unpaid.isEmpty && !onHold) return const SizedBox.shrink();
+    return Column(
+      children: [
+        FeeHoldBanner(
+          onHold: onHold,
+          manual: profile?.holdManual ?? false,
+          unpaid: unpaid,
+        ),
+        FeeAlertBanner(unpaid: unpaid),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
 
   Widget _avatar(UserModel? p, {double radius = 28, bool onCoral = false}) {
     final hasPhoto = p != null && p.photoUrl.isNotEmpty;
@@ -193,6 +213,10 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
                             size: 18,
                             color: AppColors.green,
                           ),
+                        ],
+                        if (p != null && p.isVerifiedSeller) ...[
+                          const SizedBox(width: 6),
+                          PlanBadge(profile: p, compact: true),
                         ],
                       ],
                     ),
@@ -452,6 +476,24 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
                 ),
           onTap: () => _push(const AnalyticsScreen()),
         ),
+        _ToolTile(
+          icon: Icons.rocket_launch_outlined,
+          iconBg: AppColors.coral.withValues(alpha: 0.12),
+          iconColor: AppColors.coral,
+          title: 'Grow My Shop',
+          caption: 'Plans, boosts & packs',
+          badge: const Icon(Icons.chevron_right, color: AppColors.gray),
+          onTap: () => _push(const GrowMyShopScreen()),
+        ),
+        _ToolTile(
+          icon: Icons.workspace_premium_outlined,
+          iconBg: AppColors.teal.withValues(alpha: 0.12),
+          iconColor: AppColors.teal,
+          title: 'Plans',
+          caption: 'Free, Plus & Pro',
+          badge: const Icon(Icons.chevron_right, color: AppColors.gray),
+          onTap: () => _push(const PlansScreen()),
+        ),
     ];
     Widget row(Widget a, Widget b) => IntrinsicHeight(
           child: Row(
@@ -468,6 +510,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
         row(tiles[0], tiles[1]),
         const SizedBox(height: 10),
         row(tiles[2], tiles[3]),
+        const SizedBox(height: 10),
+        row(tiles[4], tiles[5]),
       ],
     );
   }
@@ -544,7 +588,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen> {
             _OfferFeedCard(
               offer: o,
               mine: s.listingById(o.listingId),
-              offered: _offeredItem(o.offeredItemId),
+              offered: _offeredItem(o),
               busy: _busyOffers.contains(o.offerId),
               onDecline: () async {
                 setState(() => _busyOffers.add(o.offerId));
@@ -1150,6 +1194,49 @@ class _TipCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Bell with the unread count; opens the shared Notifications screen.
+class _NotificationsBell extends StatefulWidget {
+  const _NotificationsBell({required this.uid});
+
+  final String uid;
+
+  @override
+  State<_NotificationsBell> createState() => _NotificationsBellState();
+}
+
+class _NotificationsBellState extends State<_NotificationsBell> {
+  Stream<List<NotificationModel>>? _stream;
+  String? _for;
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.uid.isNotEmpty && widget.uid != _for) {
+      _for = widget.uid;
+      _stream = FirestoreService().streamNotifications(widget.uid);
+    }
+    return StreamBuilder<List<NotificationModel>>(
+      stream: _stream,
+      builder: (context, snap) {
+        final unread = (snap.data ?? const <NotificationModel>[])
+            .where((n) => !n.read)
+            .length;
+        return IconButton(
+          tooltip: 'Notifications',
+          icon: Badge(
+            isLabelVisible: unread > 0,
+            backgroundColor: AppColors.red,
+            label: Text(unread > 9 ? '9+' : '$unread'),
+            child: const Icon(Icons.notifications_none_rounded),
+          ),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const NotificationsScreen()),
+          ),
+        );
+      },
     );
   }
 }

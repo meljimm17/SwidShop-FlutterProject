@@ -196,7 +196,7 @@ async function main() {
   console.log(`categories: ${catNames.length}`);
 
   // 1. Users (24). Aggregates filled in step 6 from real seeded data.
-  const roles = [...Array(10).fill('customer'), ...Array(8).fill('seller'), ...Array(6).fill('both')];
+  const roles = [...Array(10).fill('customer'), ...Array(14).fill('both')]; // no seller-only role
   const users = [];
   const userDoc = (u) => ({
     uid: S(u.uid),
@@ -244,7 +244,7 @@ async function main() {
     if ((i + 1) % 6 === 0) console.log(`  avatars uploaded: ${i + 1}/24`);
   }
   console.log(`users: ${users.length} (10 customer / 8 seller / 6 both; 1 suspended, 1 banned)`);
-  const sellers = users.filter((u) => u.role === 'seller' || u.role === 'both');
+  const sellers = users.filter((u) => u.role === 'both');
   const buyers = users.filter((u) => u.role === 'customer' || u.role === 'both');
 
   // 2. Listings (42): 18 buyNow / 12 bid / 12 swap. ~half active.

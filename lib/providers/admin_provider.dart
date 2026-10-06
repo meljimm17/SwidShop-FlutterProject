@@ -3,10 +3,126 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../models/listing_model.dart';
+import '../models/partner_ad_model.dart';
+import '../models/payment_model.dart';
 import '../models/report_model.dart';
+import '../models/role_request_model.dart';
 import '../models/transaction_model.dart';
 import '../models/user_model.dart';
 import '../services/firestore_service.dart';
+
+/// Demo revenue derivations (all simulated money — UI labels them "Demo
+/// data"). Payments are the `payments` records; partner-ad revenue is the
+/// admin-entered `pricePaid` on each ad.
+class RevenueStats {
+  RevenueStats._();
+
+  /// Stream keys, in display order.
+  static const List<String> streams = [
+    PaymentType.fee,
+    PaymentType.boost,
+    PaymentType.featured,
+    PaymentType.plan,
+    PaymentType.photoPack,
+    'ad',
+  ];
+
+  static const Map<String, String> labels = {
+    PaymentType.fee: 'Commission fees',
+    PaymentType.boost: 'Boosts',
+    PaymentType.featured: 'Featured',
+    PaymentType.plan: 'Plans',
+    PaymentType.photoPack: 'Photo packs',
+    'ad': 'Partner ads',
+  };
+
+  /// Revenue per stream (every key in [streams] present, zero when none).
+  static Map<String, double> byStream(
+    Iterable<PaymentModel> payments,
+    Iterable<PartnerAdModel> ads,
+  ) {
+    final out = {for (final k in streams) k: 0.0};
+    for (final p in payments) {
+      out[p.type] = (out[p.type] ?? 0) + p.amount;
+    }
+    for (final a in ads) {
+      out['ad'] = out['ad']! + a.pricePaid;
+    }
+    return out;
+  }
+
+  static double total(Map<String, double> byStream) =>
+      byStream.values.fold(0.0, (a, b) => a + b);
+
+  /// Collected (paid) and outstanding (unpaid) platform fees.
+  static ({double collected, double outstanding, double overdue}) fees(
+    Iterable<TransactionModel> txns,
+  ) {
+    var collected = 0.0;
+    var outstanding = 0.0;
+    var overdue = 0.0;
+    for (final t in txns) {
+      if (t.feeStatus == 'paid') collected += t.feeAmount;
+      if (t.feeUnpaid && t.status != TransactionStatus.cancelled) {
+        outstanding += t.feeAmount;
+        if (t.feeOverdue) overdue += t.feeAmount;
+      }
+    }
+    return (collected: collected, outstanding: outstanding, overdue: overdue);
+  }
+
+  /// Payment revenue per week (Monday start), oldest first, last [weeks].
+  /// Ads are excluded (they have no payment date of their own).
+  static List<({DateTime week, double total})> weekly(
+    Iterable<PaymentModel> payments, {
+    int weeks = 6,
+    DateTime? now,
+  }) {
+    final n = now ?? DateTime.now();
+    final today = DateTime(n.year, n.month, n.day);
+    final thisMonday = today.subtract(Duration(days: today.weekday - 1));
+    final first = DateTime(
+      thisMonday.year,
+      thisMonday.month,
+      thisMonday.day - 7 * (weeks - 1),
+    );
+    final totals = List<double>.filled(weeks, 0);
+    for (final p in payments) {
+      final c = p.createdAt ?? n;
+      final day = DateTime(c.year, c.month, c.day);
+      final diff = day.difference(first).inDays;
+      if (diff < 0) continue;
+      final i = diff ~/ 7;
+      if (i >= weeks) continue;
+      totals[i] += p.amount;
+    }
+    return [
+      for (var i = 0; i < weeks; i++)
+        (
+          week: DateTime(first.year, first.month, first.day + 7 * i),
+          total: totals[i],
+        ),
+    ];
+  }
+
+  /// Sellers on a live paid plan, by plan.
+  static ({int plus, int pro}) paidPlans(Iterable<UserModel> users) {
+    var plus = 0;
+    var pro = 0;
+    for (final u in users) {
+      switch (u.effectivePlan) {
+        case 'plus':
+          plus++;
+        case 'pro':
+          pro++;
+      }
+    }
+    return (plus: plus, pro: pro);
+  }
+
+  static int activeBoosts(Iterable<UserModel> users) =>
+      users.where((u) => u.isBoosted).length;
+}
 
 /// Pure derivations over the whole marketplace (unit-testable without
 /// Firebase). Every admin number comes from here — nothing is invented.
@@ -174,7 +290,7 @@ class AdminStats {
     final sellers = users
         .where(
           (u) =>
-              (u.role == UserRole.seller || u.role == UserRole.both) &&
+              u.role == UserRole.both &&
               u.accountStatus == AccountStatus.active &&
               (u.trustedBadge || u.completedTransactions > 0),
         )
@@ -208,7 +324,8 @@ class AdminProvider extends ChangeNotifier {
     void onError(Object e) {
       debugPrint('AdminProvider stream error: $e');
       _error = e;
-      _usersLoaded = _listingsLoaded = _txnsLoaded = _reportsLoaded = true;
+      _usersLoaded = _listingsLoaded = _txnsLoaded = _reportsLoaded =
+          _purchasesLoaded = _adsLoaded = true;
       notifyListeners();
     }
 
@@ -218,6 +335,7 @@ class AdminProvider extends ChangeNotifier {
         _byUid = {for (final u in v) u.uid: u};
         _usersLoaded = true;
         notifyListeners();
+        _migrateLegacySellers(v);
       }, onError: onError),
       _firestore.streamAllListings().listen((v) {
         _listings = v;
@@ -234,6 +352,21 @@ class AdminProvider extends ChangeNotifier {
         _reportsLoaded = true;
         notifyListeners();
       }, onError: onError),
+      _firestore.streamAllPayments().listen((v) {
+        _purchases = v;
+        _purchasesLoaded = true;
+        notifyListeners();
+      }, onError: onError),
+      _firestore.streamAllPartnerAds().listen((v) {
+        _ads = v;
+        _adsLoaded = true;
+        notifyListeners();
+      }, onError: onError),
+      // Optional: a failure here must not blank the rest of the console.
+      _firestore.streamAllRoleRequests().listen((v) {
+        _roleRequests = v;
+        notifyListeners();
+      }, onError: (Object e) => debugPrint('roleRequests stream: $e')),
     ]);
   }
 
@@ -247,20 +380,53 @@ class AdminProvider extends ChangeNotifier {
   List<ListingModel> _listings = const [];
   List<TransactionModel> _txns = const [];
   List<ReportModel> _reports = const [];
+
+  /// Demo payment records (Step 1 flow — no real money).
+  List<PaymentModel> _purchases = const [];
+  List<PartnerAdModel> _ads = const [];
+  List<RoleRequestModel> _roleRequests = const [];
+
+  /// uids already rewritten from the retired 'seller' role this session.
+  final Set<String> _migratedRoles = {};
+
+  /// Opening the admin console upgrades every stored seller-only role to
+  /// Customer + Seller (the app already treats them that way).
+  void _migrateLegacySellers(List<UserModel> users) {
+    for (final u in users) {
+      if (!u.legacySellerRole || !_migratedRoles.add(u.uid)) continue;
+      _firestore
+          .migrateLegacySellerRole(u.uid)
+          .catchError((Object e) => debugPrint('migrateRole ${u.uid}: $e'));
+    }
+  }
   bool _usersLoaded = false;
   bool _listingsLoaded = false;
   bool _txnsLoaded = false;
   bool _reportsLoaded = false;
+  bool _purchasesLoaded = false;
+  bool _adsLoaded = false;
   Object? _error;
 
   bool get isLoading =>
-      !(_usersLoaded && _listingsLoaded && _txnsLoaded && _reportsLoaded);
+      !(_usersLoaded &&
+          _listingsLoaded &&
+          _txnsLoaded &&
+          _reportsLoaded &&
+          _purchasesLoaded &&
+          _adsLoaded);
   Object? get error => _error;
 
   List<UserModel> get users => _users;
   List<ListingModel> get listings => _listings;
   List<TransactionModel> get transactions => _txns;
   List<ReportModel> get reports => _reports;
+  List<PaymentModel> get payments => _purchases;
+  List<PartnerAdModel> get partnerAds => _ads;
+
+  /// Role-change requests, pending first.
+  List<RoleRequestModel> get roleRequests => _roleRequests;
+  int get pendingRoleRequests =>
+      _roleRequests.where((r) => r.isPending).length;
 
   UserModel? user(String uid) => _byUid[uid];
 

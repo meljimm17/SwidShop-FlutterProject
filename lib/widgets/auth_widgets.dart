@@ -228,11 +228,15 @@ class GoogleButton extends StatelessWidget {
                 children: [
                   GoogleLogo(size: 18),
                   SizedBox(width: 12),
-                  Text(
-                    'Continue with Google',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
+                  Flexible(
+                    child: Text(
+                      'Continue with Google',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ],

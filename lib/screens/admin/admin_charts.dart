@@ -572,3 +572,91 @@ String _compact(int v) {
 }
 
 String compactCount(int v) => _compact(v);
+
+/// Demo revenue per week (one bar per week). Tap a bar to read its total.
+class WeeklyRevenueBars extends StatefulWidget {
+  const WeeklyRevenueBars({super.key, required this.data, this.height = 130});
+
+  final List<({DateTime week, double total})> data;
+  final double height;
+
+  @override
+  State<WeeklyRevenueBars> createState() => _WeeklyRevenueBarsState();
+}
+
+class _WeeklyRevenueBarsState extends State<WeeklyRevenueBars> {
+  int? _selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = widget.data;
+    if (data.isEmpty) return SizedBox(height: widget.height);
+    var max = 0.0;
+    for (final d in data) {
+      max = math.max(max, d.total);
+    }
+    final sel = _selected ?? data.length - 1;
+    final fmt = DateFormat('MMM d');
+    final money = NumberFormat.currency(locale: 'en_PH', symbol: '₱');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Week of ${fmt.format(data[sel].week)}: ${money.format(data[sel].total)}',
+          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: widget.height,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (var i = 0; i < data.length; i++)
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _selected = i),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 5),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Container(
+                            height: max <= 0
+                                ? 2
+                                : math.max(
+                                    2,
+                                    (widget.height - 22) * data[i].total / max,
+                                  ),
+                            decoration: BoxDecoration(
+                              color: i == sel
+                                  ? AppColors.teal
+                                  : AppColors.teal.withValues(alpha: 0.4),
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(4),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            fmt.format(data[i].week),
+                            maxLines: 1,
+                            overflow: TextOverflow.clip,
+                            style: const TextStyle(
+                              fontSize: 9.5,
+                              color: AppColors.gray,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
