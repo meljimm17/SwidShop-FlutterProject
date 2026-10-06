@@ -42,7 +42,7 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
     widget.listingId,
   );
 
-  _OfferSource _source = _OfferSource.photos;
+  _OfferSource _source = _OfferSource.listing;
   String? _offeredItemId;
 
   /// Photos picked on this device, in order.
@@ -63,7 +63,10 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
     super.dispose();
   }
 
-  bool get _ready => switch (_source) {
+  _OfferSource _sourceFor(bool canSell) =>
+      canSell ? _source : _OfferSource.photos;
+
+  bool _readyFor(_OfferSource source) => switch (source) {
     _OfferSource.photos =>
       _photos.isNotEmpty && _titleCtrl.text.trim().isNotEmpty,
     _OfferSource.listing => _offeredItemId != null,
@@ -147,13 +150,16 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
 
   Future<void> _propose(ListingModel target) async {
     final uid = context.read<AuthProvider>().firebaseUser?.uid ?? '';
-    if (uid.isEmpty || !_ready || _busy) return;
+    final source = _sourceFor(
+      context.read<AuthProvider>().profile?.role.canSell ?? false,
+    );
+    if (uid.isEmpty || !_readyFor(source) || _busy) return;
     FocusScope.of(context).unfocus();
     setState(() => _busy = true);
     try {
       final offerId = _offerId ??= _firestore.newSwapOfferId();
       final SwapOfferModel offer;
-      if (_source == _OfferSource.photos) {
+      if (source == _OfferSource.photos) {
         final urls = await _uploadPhotos(offerId);
         if (mounted) setState(() => _progress = 'Sending offer…');
         offer = SwapOfferModel(
@@ -239,6 +245,7 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
           if (target == null) {
             return const Center(child: Text('Listing not found'));
           }
+          final source = _sourceFor(canSell);
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
@@ -282,7 +289,7 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
                   ),
                   const SizedBox(height: 12),
                 ],
-                if (_source == _OfferSource.photos)
+                if (source == _OfferSource.photos)
                   _photoOffer()
                 else
                   _listingOffer(uid, target),
@@ -322,7 +329,9 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
                   label: 'Propose Swap',
                   icon: Icons.swap_horiz,
                   loading: _busy,
-                  onPressed: (_busy || !_ready) ? null : () => _propose(target),
+                  onPressed: (_busy || !_readyFor(source))
+                      ? null
+                      : () => _propose(target),
                 ),
               ],
             ],

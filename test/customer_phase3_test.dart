@@ -22,6 +22,10 @@ void main() {
         parseRelatedId('offer:xyz'),
         (kind: 'offer', id: 'xyz'),
       );
+      expect(
+        parseRelatedId('trust:user-123'),
+        (kind: 'trust', id: 'user-123'),
+      );
     });
 
     test('legacy bare ids degrade gracefully', () {

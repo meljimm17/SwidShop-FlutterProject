@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
+import '../../models/notification_model.dart';
 import '../../providers/admin_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../auth/role_home.dart';
+import '../customer/notifications_screen.dart';
 import 'admin_categories_screen.dart';
 import 'admin_dashboard_screen.dart';
 import 'admin_fees_screen.dart';
@@ -106,6 +108,8 @@ class _AdminFrameState extends State<_AdminFrame> {
   Widget build(BuildContext context) {
     final admin = context.watch<AdminProvider>();
     final me = context.watch<AuthProvider>().profile;
+    final adminUid =
+        context.watch<AuthProvider>().firebaseUser?.uid ?? '';
     final queue = admin.pendingQueueCount;
 
     return PopScope(
@@ -136,6 +140,36 @@ class _AdminFrameState extends State<_AdminFrame> {
             ),
           ),
           actions: [
+            StreamBuilder<List<NotificationModel>>(
+              stream: adminUid.isEmpty
+                  ? null
+                  : admin.firestore.streamNotifications(adminUid),
+              builder: (context, snapshot) {
+                final unread =
+                    snapshot.data?.where((notification) => !notification.read).length ??
+                    0;
+                return IconButton(
+                  tooltip: 'Admin notifications',
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ChangeNotifierProvider.value(
+                        value: admin,
+                        child: const NotificationsScreen(),
+                      ),
+                    ),
+                  ),
+                  icon: Badge(
+                    isLabelVisible: unread > 0,
+                    backgroundColor: AppColors.coralDeep,
+                    label: Text(unread > 9 ? '9+' : '$unread'),
+                    child: const Icon(
+                      Icons.notifications_none,
+                      color: AppColors.ink,
+                    ),
+                  ),
+                );
+              },
+            ),
             IconButton(
               tooltip: 'Report queue',
               onPressed: () => _select(AdminSection.reports),
@@ -144,7 +178,7 @@ class _AdminFrameState extends State<_AdminFrame> {
                 backgroundColor: AppColors.red,
                 label: Text(queue > 9 ? '9+' : '$queue'),
                 child: const Icon(
-                  Icons.notifications_none,
+                  Icons.outlined_flag,
                   color: AppColors.ink,
                 ),
               ),

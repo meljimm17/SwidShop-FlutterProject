@@ -6,7 +6,6 @@ import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/listing_model.dart';
 import '../../models/notification_model.dart';
-import '../../models/user_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/listing_provider.dart';
 import '../../services/firestore_service.dart';
@@ -96,10 +95,9 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             if (isGuest) _guestBanner(context),
             _greeting(auth),
-            _searchBar(context),
+            _quickAccess(context),
             const SponsoredCarousel(),
             const PartnerAdSlot(),
-            _quickAccess(context),
             Expanded(
               child: RefreshIndicator(
                 onRefresh: () => listings.refresh(),
@@ -126,13 +124,12 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Recently Listed + Trusted row + paged grid in one scroll view.
+  /// Recently Listed + paged grid in one scroll view.
   Widget _feed(BuildContext context, ListingProvider listings) {
     final visible = listings.visibleListings;
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        _trustedRow(context, listings),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: Text(
@@ -173,100 +170,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Horizontal Trusted-sellers strip; hidden while filtering or empty.
-  Widget _trustedRow(BuildContext context, ListingProvider listings) {
-    if (listings.hasActiveFilters || listings.query.trim().isNotEmpty) {
-      return const SizedBox.shrink();
-    }
-    return StreamBuilder<List<UserModel>>(
-      stream: FirestoreService().streamTrustedUsers(),
-      builder: (context, snap) {
-        final sellers = (snap.data ?? const <UserModel>[])
-            .where((u) => u.role == UserRole.both)
-            .take(10)
-            .toList();
-        if (sellers.isEmpty) return const SizedBox.shrink();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Trusted Sellers',
-                      style:
-                          TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const TrustedSellersScreen(),
-                      ),
-                    ),
-                    child: const Text('See all'),
-                  ),
-                ],
-              ),
-            ),
-            SizedBox(
-              height: 92,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: sellers.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 12),
-                itemBuilder: (context, i) {
-                  final s = sellers[i];
-                  return GestureDetector(
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => SearchFilterScreen(
-                          sellerId: s.uid,
-                          sellerName: s.name.isEmpty
-                              ? 'Stall'
-                              : '${s.name}\'s stall',
-                        ),
-                      ),
-                    ),
-                    child: Column(
-                      children: [
-                        CircleAvatar(
-                          radius: 28,
-                          backgroundColor: AppColors.surface,
-                          backgroundImage: s.photoUrl.isNotEmpty
-                              ? NetworkImage(s.photoUrl)
-                              : null,
-                          child: s.photoUrl.isEmpty
-                              ? const Icon(Icons.storefront_outlined,
-                                  color: AppColors.gray)
-                              : null,
-                        ),
-                        const SizedBox(height: 4),
-                        SizedBox(
-                          width: 72,
-                          child: Text(
-                            s.name.isEmpty ? 'Seller' : s.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   /// Greeting header (mockup "Mabuhay" block — real display name only).
   Widget _greeting(AuthProvider auth) {
     final name = auth.profile?.name.trim() ?? '';
@@ -295,35 +198,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _searchBar(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: GestureDetector(
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const SearchFilterScreen()),
-        ),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(AppTheme.buttonRadius),
-            border: Border.all(color: AppColors.line),
-          ),
-          child: const Row(
-            children: [
-              Icon(Icons.search, color: AppColors.gray, size: 20),
-              SizedBox(width: 10),
-              Text(
-                'Search thrift finds',
-                style: TextStyle(color: AppColors.gray),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _quickAccess(BuildContext context) {
     Widget item(IconData icon, String label, Color color, VoidCallback onTap) {
       return GestureDetector(
@@ -342,7 +216,12 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Icon(icon, color: color, size: 24),
             ),
             const SizedBox(height: 6),
-            Text(label, style: const TextStyle(fontSize: 12)),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
           ],
         ),
       );
@@ -360,31 +239,54 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          item(Icons.gavel_outlined, 'Bidding', AppColors.amber, () {
-            Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const BiddingListScreen()),
-            );
-          }),
-          item(Icons.swap_horiz, 'Swap', AppColors.teal,
-              () => browseType(ListingType.swap)),
-          item(Icons.shopping_bag_outlined, 'Buy Now', AppColors.coral,
-              () => browseType(ListingType.buyNow)),
-          item(Icons.grid_view_outlined, 'Categories', AppColors.ink, () {
-            Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SearchFilterScreen()),
-            );
-          }),
-          item(Icons.verified_outlined, 'Trusted', AppColors.green, () {
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => const TrustedSellersScreen(),
-              ),
-            );
-          }),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            SizedBox(
+              width: 62,
+              child: item(Icons.gavel_outlined, 'Bidding', AppColors.amber, () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BiddingListScreen()),
+                );
+              }),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 62,
+              child: item(Icons.swap_horiz, 'Swap', AppColors.teal,
+                  () => browseType(ListingType.swap)),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 62,
+              child: item(Icons.shopping_bag_outlined, 'Buy Now',
+                  AppColors.coral, () => browseType(ListingType.buyNow)),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 62,
+              child: item(Icons.grid_view_outlined, 'Categories', AppColors.ink,
+                  () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SearchFilterScreen()),
+                );
+              }),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 62,
+              child: item(Icons.verified_outlined, 'Trusted', AppColors.green,
+                  () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const TrustedSellersScreen(),
+                  ),
+                );
+              }),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -47,6 +47,18 @@ service cloud.firestore {
         get(userPath(uid())).data.get('role', '') == 'admin';
     }
 
+    function transactionPath(transactionId) {
+      return /databases/$(database)/documents/transactions/$(transactionId);
+    }
+
+    function isDealParticipant(transactionId) {
+      let path = transactionPath(transactionId);
+      return isSignedIn() && exists(path) &&
+        (get(path).data.buyerId == uid() ||
+         get(path).data.sellerId == uid() ||
+         isAdmin());
+    }
+
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
@@ -253,6 +265,18 @@ service cloud.firestore {
         request.resource.data.avgRating <= 5;
     }
 
+    // Trust aggregates and badge approval are managed by Cloud Functions or
+    // an admin, never by an account owner.
+    function trustFieldsUnchanged() {
+      return same('avgRating', 0) &&
+        same('completedTransactions', 0) &&
+        same('completionRate', 0) &&
+        same('trustedBadge', false) &&
+        same('trustedBadgeEligible', false) &&
+        same('trustedOpenReports', 0) &&
+        same('trustedEligibilityNotified', false);
+    }
+
     // Owner edits, dispatched on cheap checks so only ONE path is fully
     // evaluated (keeps well under the rules expression budget).
     function ownerUserUpdate() {
@@ -260,7 +284,8 @@ service cloud.firestore {
       // registration; afterwards changed only by an admin-approved role
       // request — except the retired 'seller' role, which its owner's app
       // rewrites to 'both'.
-      return (same('role', 'customer') ||
+      return trustFieldsUnchanged() &&
+        (same('role', 'customer') ||
           (request.resource.data.get('role', '') in ['customer', 'both'] &&
             (resource.data.get('profileComplete', true) == false ||
               (resource.data.get('role', '') == 'seller' &&
@@ -285,7 +310,14 @@ service cloud.firestore {
         request.resource.data.get('boostedUntil', null) == null &&
         request.resource.data.get('accountStatus', 'active') == 'active' &&
         request.resource.data.get('holdManual', false) == false &&
-        request.resource.data.get('lastPaymentId', '') == '');
+        request.resource.data.get('lastPaymentId', '') == '' &&
+        request.resource.data.get('avgRating', 0) == 0 &&
+        request.resource.data.get('completedTransactions', 0) == 0 &&
+        request.resource.data.get('completionRate', 0) == 0 &&
+        request.resource.data.get('trustedBadge', false) == false &&
+        request.resource.data.get('trustedBadgeEligible', false) == false &&
+        request.resource.data.get('trustedOpenReports', 0) == 0 &&
+        request.resource.data.get('trustedEligibilityNotified', false) == false);
       allow update: if isOwner(userId)
         ? (ownerUserUpdate() || isAdmin())
         : (isAdmin() || (isSignedIn() && ratingRefresh()));
@@ -518,16 +550,11 @@ service cloud.firestore {
 
     // chats/{transactionId} parent doc (thread index) + messages.
     match /chats/{transactionId} {
-      allow read: if isAdmin() || (isSignedIn() &&
-        (resource == null || resource.data.buyerId == uid() ||
-         resource.data.sellerId == uid()));
-      allow create, update: if isSignedIn() &&
-        (request.resource.data.buyerId == uid() ||
-         request.resource.data.sellerId == uid());
+      allow read, create, update: if isDealParticipant(transactionId);
 
       match /messages/{messageId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() &&
+        allow read: if isDealParticipant(transactionId);
+        allow create: if isDealParticipant(transactionId) &&
           request.resource.data.senderId == uid();
         allow update, delete: if isAdmin();
       }

@@ -62,6 +62,8 @@ class UserModel {
     this.completedTransactions = 0,
     this.completionRate = 0,
     this.trustedBadge = false,
+    this.trustedBadgeEligible = false,
+    this.trustedOpenReports = 0,
     this.profileComplete = true,
     this.accountStatus = AccountStatus.active,
     this.plan = 'free',
@@ -98,6 +100,12 @@ class UserModel {
   final int completedTransactions;
   final double completionRate;
   final bool trustedBadge;
+
+  /// Server-calculated Trusted Seller status; admin approval is still needed.
+  final bool trustedBadgeEligible;
+
+  /// Pending reports against this seller, their listings, or their ratings.
+  final int trustedOpenReports;
 
   /// False until role, profile and terms steps are done. Google sign-ups
   /// start incomplete and are routed back into registration. Missing on
@@ -173,6 +181,8 @@ class UserModel {
           (map['completedTransactions'] as num?)?.toInt() ?? 0,
       completionRate: (map['completionRate'] as num?)?.toDouble() ?? 0,
       trustedBadge: map['trustedBadge'] as bool? ?? false,
+      trustedBadgeEligible: map['trustedBadgeEligible'] as bool? ?? false,
+      trustedOpenReports: (map['trustedOpenReports'] as num?)?.toInt() ?? 0,
       profileComplete: map['profileComplete'] as bool? ?? true,
       accountStatus: AccountStatus.fromValue(map['accountStatus'] as String?),
       plan: map['plan'] as String? ?? 'free',
@@ -234,6 +244,8 @@ class UserModel {
     int? completedTransactions,
     double? completionRate,
     bool? trustedBadge,
+    bool? trustedBadgeEligible,
+    int? trustedOpenReports,
     bool? profileComplete,
     AccountStatus? accountStatus,
     String? plan,
@@ -260,6 +272,9 @@ class UserModel {
             completedTransactions ?? this.completedTransactions,
         completionRate: completionRate ?? this.completionRate,
         trustedBadge: trustedBadge ?? this.trustedBadge,
+        trustedBadgeEligible:
+            trustedBadgeEligible ?? this.trustedBadgeEligible,
+        trustedOpenReports: trustedOpenReports ?? this.trustedOpenReports,
         profileComplete: profileComplete ?? this.profileComplete,
         accountStatus: accountStatus ?? this.accountStatus,
         plan: plan ?? this.plan,

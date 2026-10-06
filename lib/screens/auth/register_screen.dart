@@ -245,12 +245,26 @@ class _RegisterScreenState extends State<RegisterScreen> {
       ),
     );
     if (source == null) return null;
-    final picked = await ImagePicker().pickImage(
-      source: source,
-      maxWidth: 1600,
-      imageQuality: 85,
-    );
-    return picked == null ? null : File(picked.path);
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 1600,
+        imageQuality: 85,
+      );
+      return picked == null ? null : File(picked.path);
+    } on PlatformException catch (e) {
+      debugPrint('pickRegistrationImage: $e');
+      if (mounted) {
+        _snack(
+          'Could not access that photo source. Check permissions and try again.',
+        );
+      }
+      return null;
+    } on MissingPluginException catch (e) {
+      debugPrint('pickRegistrationImage: $e');
+      if (mounted) _snack('Photo selection is unavailable on this device.');
+      return null;
+    }
   }
 
   Future<void> _pickPhoto() async {

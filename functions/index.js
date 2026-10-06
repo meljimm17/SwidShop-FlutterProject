@@ -2,8 +2,8 @@
  * SwidShop Cloud Functions — Node.js 20 runtime.
  *
  * Responsibilities:
- *  1. trust-badge  : recompute a seller's rating/completion stats and award
- *                    the "Trusted" badge.
+ *  1. trust-review : recompute seller eligibility and notify admins for
+ *                    manual Trusted badge review.
  *  2. auction-close: close expired auctions and create the winning transaction.
  */
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
@@ -15,34 +15,34 @@ const admin = require("firebase-admin");
 admin.initializeApp();
 const db = admin.firestore();
 
-// Trust thresholds for awarding the badge.
+// Keep in sync with AppConstants and the registration Terms.
 const TRUST = {
-  minCompletedTransactions: 5,
+  minCompletedTransactions: 10,
   minCompletionRate: 0.9,
   minAvgRating: 4.5,
 };
 
 /**
- * Recomputes a user's aggregate stats (avgRating, completedTransactions,
- * completionRate) and sets `trustedBadge` when thresholds are met.
+ * Recomputes a seller's real stats and report count. Eligibility is automatic;
+ * the badge itself requires an admin decision in User Details.
  */
 async function recomputeTrust(uid) {
-  const ratingsSnap = await db
-    .collection("ratings")
-    .where("ratedUserId", "==", uid)
-    .get();
+  const [userSnap, ratingsSnap, txnsSnap, listingsSnap, reportsSnap, adminsSnap] =
+    await Promise.all([
+      db.collection("users").doc(uid).get(),
+      db.collection("ratings").where("ratedUserId", "==", uid).get(),
+      db.collection("transactions").where("sellerId", "==", uid).get(),
+      db.collection("listings").where("sellerId", "==", uid).get(),
+      db.collection("reports").where("status", "==", "pending").get(),
+      db.collection("users").where("role", "==", "admin").get(),
+    ]);
+  if (!userSnap.exists) return null;
 
-  let sum = 0;
-  ratingsSnap.forEach((doc) => {
-    sum += Number(doc.get("stars") || 0);
-  });
-  const avgRating = ratingsSnap.size > 0 ? sum / ratingsSnap.size : 0;
-
-  const txnsSnap = await db
-    .collection("transactions")
-    .where("sellerId", "==", uid)
-    .get();
-
+  const userData = userSnap.data();
+  const ratingValues = ratingsSnap.docs.map((doc) => Number(doc.get("stars") || 0));
+  const avgRating = ratingValues.length
+    ? ratingValues.reduce((total, stars) => total + stars, 0) / ratingValues.length
+    : 0;
   let completed = 0;
   let resolved = 0;
   txnsSnap.forEach((doc) => {
@@ -56,33 +56,127 @@ async function recomputeTrust(uid) {
   });
 
   const completionRate = resolved > 0 ? completed / resolved : 0;
-  const trustedBadge =
+  const listingIds = new Set(listingsSnap.docs.map((doc) => doc.id));
+  const ratingIds = new Set(ratingsSnap.docs.map((doc) => doc.id));
+  const openReports = reportsSnap.docs.filter((doc) => {
+    const report = doc.data();
+    if (report.targetType === "user") return report.targetId === uid;
+    if (report.targetType === "listing") return listingIds.has(report.targetId);
+    if (report.targetType === "rating") return ratingIds.has(report.targetId);
+    return false;
+  }).length;
+  const eligible =
+    userData.role === "both" &&
     completed >= TRUST.minCompletedTransactions &&
     completionRate >= TRUST.minCompletionRate &&
-    avgRating >= TRUST.minAvgRating;
+    avgRating >= TRUST.minAvgRating &&
+    openReports === 0;
+  const userRef = db.collection("users").doc(uid);
+  const adminNotifications = adminsSnap.docs.map((doc) => ({
+    ref: db
+      .collection("notifications")
+      .doc(doc.id)
+      .collection("items")
+      .doc(),
+    message: `${userData.name || userData.email || "A seller"} meets the `
+      + "Trusted Seller requirements. Review their User Details before "
+      + "awarding the badge.",
+  }));
+  const sellerNotificationRef = db
+    .collection("notifications")
+    .doc(uid)
+    .collection("items")
+    .doc();
+  let notifyAdmins = false;
+  let badgeRemoved = false;
 
-  await db.collection("users").doc(uid).set(
-    {
-      avgRating: Math.round(avgRating * 10) / 10,
-      completedTransactions: completed,
-      completionRate,
-      trustedBadge,
-    },
-    { merge: true }
-  );
+  await db.runTransaction(async (transaction) => {
+    const latest = await transaction.get(userRef);
+    if (!latest.exists) return;
+    const latestData = latest.data();
+    const wasEligible = latestData.trustedBadgeEligible === true;
+    const hadBadge = latestData.trustedBadge === true;
+    const trustedBadge = eligible ? hadBadge : false;
+    notifyAdmins = eligible &&
+      latestData.trustedEligibilityNotified !== true &&
+      adminsSnap.size > 0;
+    badgeRemoved = hadBadge && !eligible;
 
-  logger.info("recomputeTrust", { uid, avgRating, completed, completionRate, trustedBadge });
-  return { avgRating, completed, completionRate, trustedBadge };
+    transaction.set(
+      userRef,
+      {
+        avgRating: Math.round(avgRating * 10) / 10,
+        completedTransactions: completed,
+        completionRate,
+        trustedBadgeEligible: eligible,
+        trustedOpenReports: openReports,
+        trustedEligibilityNotified: eligible
+          ? (latestData.trustedEligibilityNotified === true || notifyAdmins)
+          : false,
+        trustedBadge,
+      },
+      { merge: true }
+    );
+    if (notifyAdmins) {
+      for (const notification of adminNotifications) {
+        transaction.set(notification.ref, {
+          type: "system",
+          message: notification.message,
+          relatedId: `trust:${uid}`,
+          read: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
+    if (badgeRemoved) {
+      transaction.set(sellerNotificationRef, {
+        type: "system",
+        message: "Your Trusted Seller badge was removed because your account "
+          + "no longer meets the eligibility requirements.",
+        relatedId: `trust:${uid}`,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    if (wasEligible !== eligible || hadBadge !== trustedBadge) {
+      logger.info("trustEligibilityChanged", {
+        uid,
+        eligible,
+        trustedBadge,
+        openReports,
+      });
+    }
+  });
+
+  if (eligible && adminsSnap.empty) {
+    logger.warn("trustEligibilityNoAdmin", { uid });
+  }
+  return {
+    avgRating,
+    completed,
+    completionRate,
+    openReports,
+    eligible,
+  };
 }
 
 /**
- * Callable: recompute a user's trust stats.
+ * Callable: recompute the caller's own trust stats, or an account as admin.
  * Payload: { uid }  (defaults to the caller's uid)
  */
 exports.computeTrustBadge = onCall(async (request) => {
   const uid = (request.data && request.data.uid) || request.auth?.uid;
   if (!uid) {
     throw new HttpsError("invalid-argument", "A uid is required.");
+  }
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Sign in to refresh trust status.");
+  }
+  if (uid !== request.auth.uid) {
+    const caller = await db.collection("users").doc(request.auth.uid).get();
+    if (!caller.exists || caller.get("role") !== "admin") {
+      throw new HttpsError("permission-denied", "Only admins can review another account.");
+    }
   }
   return recomputeTrust(uid);
 });
@@ -94,15 +188,80 @@ exports.computeTrustBadge = onCall(async (request) => {
 exports.onTransactionWritten = onDocumentWritten(
   "transactions/{transactionId}",
   async (event) => {
+    const before = event.data?.before?.data();
     const after = event.data?.after?.data();
-    if (!after) return;
-    const { buyerId, sellerId } = after;
-    const tasks = [];
-    if (sellerId) tasks.push(recomputeTrust(sellerId));
-    if (buyerId) tasks.push(recomputeTrust(buyerId));
-    await Promise.all(tasks);
+    const uids = new Set([before?.sellerId, after?.sellerId].filter(Boolean));
+    await Promise.all([...uids].map(recomputeTrust));
   }
 );
+
+exports.onRatingWritten = onDocumentWritten(
+  "ratings/{ratingId}",
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    const uids = new Set([before?.ratedUserId, after?.ratedUserId].filter(Boolean));
+    await Promise.all([...uids].map(recomputeTrust));
+  }
+);
+
+exports.onReportWritten = onDocumentWritten(
+  "reports/{reportId}",
+  async (event) => {
+    const reports = [
+      event.data?.before?.data(),
+      event.data?.after?.data(),
+    ].filter(Boolean);
+    const uids = new Set();
+    for (const report of reports) {
+      if (report.targetType === "user" && report.targetId) {
+        uids.add(report.targetId);
+      } else if (report.targetType === "listing" && report.targetId) {
+        const listing = await db.collection("listings").doc(report.targetId).get();
+        if (listing.exists && listing.get("sellerId")) uids.add(listing.get("sellerId"));
+      } else if (report.targetType === "rating" && report.targetId) {
+        const rating = await db.collection("ratings").doc(report.targetId).get();
+        if (rating.exists && rating.get("ratedUserId")) uids.add(rating.get("ratedUserId"));
+      }
+    }
+    await Promise.all([...uids].map(recomputeTrust));
+  }
+);
+
+const TRUST_MANAGED_FIELDS = new Set([
+  "avgRating",
+  "completedTransactions",
+  "completionRate",
+  "trustedBadge",
+  "trustedBadgeEligible",
+  "trustedOpenReports",
+  "trustedEligibilityNotified",
+]);
+
+exports.onUserWritten = onDocumentWritten("users/{uid}", async (event) => {
+  const before = event.data?.before?.data();
+  const after = event.data?.after?.data();
+  if (!after) return;
+  const changed = new Set([
+    ...Object.keys(before || {}),
+    ...Object.keys(after),
+  ].filter((key) => before?.[key] !== after[key]));
+  const trustOnly = changed.size > 0 &&
+    [...changed].every((key) => TRUST_MANAGED_FIELDS.has(key));
+  if (!trustOnly) await recomputeTrust(event.params.uid);
+
+  if (after.role === "admin" && before?.role !== "admin") {
+    const candidates = await db
+      .collection("users")
+      .where("trustedBadgeEligible", "==", true)
+      .get();
+    await Promise.all(
+      candidates.docs
+        .filter((doc) => doc.get("trustedEligibilityNotified") !== true)
+        .map((doc) => recomputeTrust(doc.id))
+    );
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Demo monetization — WRITTEN BUT NOT DEPLOYED YET (professor's rule).

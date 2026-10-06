@@ -89,7 +89,13 @@ class AppConstants {
   static const String userPrivateDetailsDoc = 'details';
 
   /// Bump when the Terms & Conditions text changes materially.
-  static const String termsVersion = '2026-10-04';
+  static const String termsVersion = '2026-10-07';
+
+  /// Trusted Seller eligibility thresholds (mirrored in functions/index.js).
+  static const int trustedMinCompletedTransactions = 10;
+  static const double trustedMinCompletionRate = 0.9;
+  static const double trustedMinAvgRating = 4.5;
+
   static const String listingsCollection = 'listings';
   static const String bidsCollection = 'bids';
   static const String swapOffersCollection = 'swapOffers';

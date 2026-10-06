@@ -336,6 +336,7 @@ class AdminProvider extends ChangeNotifier {
         _usersLoaded = true;
         notifyListeners();
         _migrateLegacySellers(v);
+        _reviewTrust(v);
       }, onError: onError),
       _firestore.streamAllListings().listen((v) {
         _listings = v;
@@ -399,6 +400,26 @@ class AdminProvider extends ChangeNotifier {
           .catchError((Object e) => debugPrint('migrateRole ${u.uid}: $e'));
     }
   }
+
+  bool _trustReviewed = false;
+
+  /// Trusted Seller check for every seller, once per console session. The
+  /// trust Cloud Function isn't deployed, so this is what flags newly
+  /// eligible sellers (admins get a `trust:{uid}` notification) and strips
+  /// badges that no longer qualify. Sequential to keep reads modest.
+  Future<void> _reviewTrust(List<UserModel> users) async {
+    if (_trustReviewed) return;
+    _trustReviewed = true;
+    for (final u in users) {
+      if (u.role != UserRole.both) continue;
+      try {
+        await Future.sync(() => _firestore.recomputeTrust(u.uid));
+      } catch (e) {
+        debugPrint('reviewTrust ${u.uid}: $e');
+      }
+    }
+  }
+
   bool _usersLoaded = false;
   bool _listingsLoaded = false;
   bool _txnsLoaded = false;

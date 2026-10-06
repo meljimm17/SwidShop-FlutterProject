@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:swidshop/models/category_model.dart';
 import 'package:swidshop/models/payment_model.dart';
 import 'package:swidshop/models/listing_model.dart';
+import 'package:swidshop/models/notification_model.dart';
 import 'package:swidshop/models/partner_ad_model.dart';
 import 'package:swidshop/models/rating_model.dart';
 import 'package:swidshop/models/report_model.dart';
@@ -68,12 +69,10 @@ class _FakeFirestore implements FirestoreService {
   Stream<List<ReportModel>> streamAllReports() => Stream.value(reports);
 
   @override
-  Stream<List<PaymentModel>> streamAllPayments() =>
-      Stream.value(const []);
+  Stream<List<PaymentModel>> streamAllPayments() => Stream.value(const []);
 
   @override
-  Stream<List<PartnerAdModel>> streamAllPartnerAds() =>
-      Stream.value(const []);
+  Stream<List<PartnerAdModel>> streamAllPartnerAds() => Stream.value(const []);
 
   @override
   Stream<List<RoleRequestModel>> streamAllRoleRequests() => Stream.value([
@@ -85,6 +84,10 @@ class _FakeFirestore implements FirestoreService {
       createdAt: DateTime(2026, 10, 4),
     ),
   ]);
+
+  @override
+  Stream<List<NotificationModel>> streamNotifications(String uid) =>
+      Stream.value(const []);
 
   @override
   Stream<List<CategoryModel>> streamCategories() => Stream.value(const [
@@ -458,6 +461,7 @@ void main() {
     // Dashboard.
     expect(find.text('Mabuhay, Carla'), findsOneWidget);
     expect(find.text('Deals per Week'), findsOneWidget);
+    expect(find.text('Pending Reports'), findsOneWidget);
     await tester.scrollUntilVisible(find.text('Top / Trusted Sellers'), 200);
     await tester.pump(const Duration(milliseconds: 400));
 
@@ -546,6 +550,14 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('User Detail'), findsOneWidget);
     expect(find.text('Ban Account'), findsOneWidget);
+    expect(find.text('Trusted Seller Review'), findsOneWidget);
+    await tester.dragUntilVisible(
+      find.text('Transaction History'),
+      find.byType(ListView).last,
+      const Offset(0, -200),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
     expect(find.text('Transaction History'), findsOneWidget);
   });
 }

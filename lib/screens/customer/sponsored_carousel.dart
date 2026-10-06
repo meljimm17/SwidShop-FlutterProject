@@ -82,17 +82,25 @@ class _SponsoredCarouselState extends State<SponsoredCarousel> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Padding(
-                  padding: EdgeInsets.fromLTRB(20, 12, 20, 0),
-                  child: Text(
-                    'Sponsored',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Row(
+                    children: [
+                      Icon(Icons.campaign_outlined,
+                          size: 16, color: AppColors.gray),
+                      SizedBox(width: 5),
+                      Text(
+                        'Sponsored',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.gray,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 SizedBox(
-                  height: 190,
+                  height: 84,
                   child: PageView.builder(
                     controller: _page,
                     itemCount: cards.length,
@@ -103,7 +111,7 @@ class _SponsoredCarouselState extends State<SponsoredCarousel> {
                 ),
                 if (cards.length > 1)
                   Padding(
-                    padding: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.only(top: 2),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -142,7 +150,7 @@ class _SponsoredCarouselState extends State<SponsoredCarousel> {
         ),
       ),
       child: Container(
-        margin: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+        margin: const EdgeInsets.fromLTRB(6, 4, 6, 0),
         decoration: BoxDecoration(
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(AppTheme.cardRadius),
@@ -152,7 +160,7 @@ class _SponsoredCarouselState extends State<SponsoredCarousel> {
         child: Row(
           children: [
             SizedBox(
-              width: 140,
+              width: 72,
               height: double.infinity,
               child: image == null
                   ? Container(
@@ -175,29 +183,41 @@ class _SponsoredCarouselState extends State<SponsoredCarousel> {
             ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    _PromoTag(
-                      label: listing.isFeatured ? 'Featured' : 'Sponsored',
-                    ),
-                    const SizedBox(height: 6),
                     Text(
                       listing.title,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      AppUtils.formatCurrency(listing.displayPrice),
                       style: const TextStyle(
-                        color: AppColors.coral,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
                       ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        _PromoTag(
+                          label:
+                              listing.isFeatured ? 'Featured' : 'Sponsored',
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            AppUtils.formatCurrency(listing.displayPrice),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.coral,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -255,8 +275,8 @@ class _PartnerAdSlotState extends State<PartnerAdSlot> {
         if (ads.isEmpty) return const SizedBox.shrink();
         final ad = ads[_index % ads.length];
         return Container(
-          margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          height: 64,
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          height: 52,
           decoration: BoxDecoration(
             color: AppColors.ink,
             borderRadius: BorderRadius.circular(12),
@@ -266,7 +286,7 @@ class _PartnerAdSlotState extends State<PartnerAdSlot> {
             children: [
               if (ad.imageUrl.isNotEmpty)
                 SizedBox(
-                  width: 96,
+                  width: 72,
                   height: double.infinity,
                   child: CachedNetworkImage(
                     imageUrl: ad.imageUrl,

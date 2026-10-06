@@ -47,6 +47,26 @@ void main() {
     });
   });
 
+  group('Trusted Seller review state', () {
+    test('reads eligibility and unresolved-report count from server fields', () {
+      final user = UserModel.fromMap('seller1', {
+        'name': 'Seller',
+        'trustedBadgeEligible': true,
+        'trustedOpenReports': 0,
+      });
+      expect(user.trustedBadgeEligible, isTrue);
+      expect(user.trustedOpenReports, 0);
+      expect(user.copyWith(trustedBadgeEligible: false).trustedBadgeEligible,
+          isFalse);
+    });
+
+    test('legacy accounts default to not eligible', () {
+      final user = UserModel.fromMap('seller1', const {});
+      expect(user.trustedBadgeEligible, isFalse);
+      expect(user.trustedOpenReports, 0);
+    });
+  });
+
   group('ReportTargetType', () {
     test('parses the rating target (Phase 4.7)', () {
       expect(ReportTargetType.fromValue('rating'), ReportTargetType.rating);

@@ -14,6 +14,7 @@ import '../models/rating_model.dart';
 import '../models/report_model.dart';
 import '../models/swap_offer_model.dart';
 import '../models/transaction_model.dart';
+import '../models/trust_review.dart';
 import '../models/user_model.dart';
 import '../models/partner_ad_model.dart';
 import '../models/role_request_model.dart';
@@ -442,6 +443,34 @@ class FirestoreService {
     });
   }
 
+  /// Closes every expired bid listing while the app is open.
+  ///
+  /// Queries by auction type only, then filters status and end time locally
+  /// to avoid needing a composite index.
+  Future<void> closeEndedAuctions() async {
+    final snap = await _listings
+        .where('type', isEqualTo: ListingType.bid.value)
+        .get();
+    final now = DateTime.now();
+    final expired = snap.docs
+        .map((doc) => ListingModel.fromMap(doc.id, doc.data()))
+        .where(
+          (listing) =>
+              listing.status == ListingStatus.active &&
+              listing.auctionEndAt != null &&
+              !listing.auctionEndAt!.isAfter(now),
+        )
+        .toList();
+
+    for (final listing in expired) {
+      try {
+        await closeAuctionIfEnded(listing.listingId);
+      } catch (e) {
+        debugPrint('closeEndedAuction ${listing.listingId}: $e');
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // swapOffers
   // ---------------------------------------------------------------------------
@@ -731,8 +760,10 @@ class FirestoreService {
   Future<void> updateTransactionStatus(
     String transactionId,
     TransactionStatus status,
-  ) =>
-      _transactions.doc(transactionId).update({'status': status.value});
+  ) async {
+    await _transactions.doc(transactionId).update({'status': status.value});
+    await _refreshTrustForDeal(transactionId);
+  }
 
   /// All of a seller's transactions, newest first.
   Stream<List<TransactionModel>> streamSellerTransactions(String sellerId) =>
@@ -887,6 +918,7 @@ class FirestoreService {
     final data = report.copyWith(reportId: ref.id).toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
     await ref.set(data);
+    await _refreshTrustForReport(report.targetType, report.targetId);
     return ref.id;
   }
 
@@ -927,6 +959,31 @@ class FirestoreService {
       'relatedId': n.relatedId,
       'read': n.read,
       'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Admin-only award, guarded by the latest Cloud Function eligibility
+  /// result. Badge and seller notification are committed together.
+  Future<void> awardTrustedBadge(String uid) async {
+    final userRef = _users.doc(uid);
+    final notificationRef = _notificationItems(uid).doc();
+    await _db.runTransaction((transaction) async {
+      final user = await transaction.get(userRef);
+      final data = user.data();
+      if (data == null) throw StateError('User not found.');
+      if (data['trustedBadgeEligible'] != true) {
+        throw StateError('This seller is no longer eligible for the badge.');
+      }
+      if (data['trustedBadge'] == true) return;
+      transaction.update(userRef, {'trustedBadge': true});
+      transaction.set(notificationRef, {
+        'type': NotificationType.system.value,
+        'message': 'Congratulations! An admin reviewed your account and '
+            'awarded you the Trusted Seller badge.',
+        'relatedId': 'trust:$uid',
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
@@ -1012,15 +1069,150 @@ class FirestoreService {
   /// Client-side stand-in for the `computeTrustBadge` Cloud Function
   /// (not deployed): call after `addRating` so profiles reflect new
   /// reviews immediately.
-  Future<void> refreshUserRating(String uid) async {
-    final snap = await _ratings.where('ratedUserId', isEqualTo: uid).get();
-    var sum = 0.0;
-    for (final d in snap.docs) {
-      sum += ((d.data()['stars'] as num?) ?? 0).toDouble();
+  /// Refreshes [uid]'s rating average together with the rest of their
+  /// Trusted Seller stats (see [recomputeTrust]).
+  Future<void> refreshUserRating(String uid) => recomputeTrust(uid);
+
+  /// In-app twin of `recomputeTrust` in functions/index.js, which is NOT
+  /// deployed. Recomputes avgRating / completedTransactions /
+  /// completionRate / open reports and Trusted Seller eligibility from real
+  /// docs. When a seller first becomes eligible every admin gets one
+  /// notification (`trust:{uid}` → User Detail); a badge holder who no
+  /// longer qualifies loses the badge and is told why. The badge is only
+  /// ever granted by an admin ([awardTrustedBadge]). Equality-only queries.
+  Future<TrustReview?> recomputeTrust(String uid) async {
+    if (uid.isEmpty) return null;
+    final ratingsF = _ratings.where('ratedUserId', isEqualTo: uid).get();
+    final txnsF = _transactions.where('sellerId', isEqualTo: uid).get();
+    final listingsF = _listings.where('sellerId', isEqualTo: uid).get();
+    final reportsF = _reports
+        .where('status', isEqualTo: ReportStatus.pending.value)
+        .get();
+    final adminsF =
+        _users.where('role', isEqualTo: UserRole.admin.value).get();
+    final ratings = await ratingsF;
+    final txns = await txnsF;
+    final listings = await listingsF;
+    final reports = await reportsF;
+    final admins = await adminsF;
+
+    final openReports = TrustReview.openReportsFor(
+      uid: uid,
+      listingIds: {for (final d in listings.docs) d.id},
+      ratingIds: {for (final d in ratings.docs) d.id},
+      reports: reports.docs.map((d) => ReportModel.fromMap(d.id, d.data())),
+    );
+    final stars = [
+      for (final d in ratings.docs) (d.data()['stars'] as num?) ?? 0,
+    ];
+    final deals = [
+      for (final d in txns.docs)
+        TransactionStatus.fromValue(d.data()['status'] as String?),
+    ];
+
+    final userRef = _users.doc(uid);
+    TrustReview? review;
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(userRef);
+      final data = snap.data();
+      if (data == null) return;
+      final r = review = TrustReview.evaluate(
+        isSeller: UserRole.fromValue(data['role'] as String?) == UserRole.both,
+        stars: stars,
+        sellerDeals: deals,
+        openReports: openReports,
+      );
+      final hadBadge = data['trustedBadge'] == true;
+      final notified = data['trustedEligibilityNotified'] == true;
+      final notifyAdmins = r.eligible && !notified && admins.docs.isNotEmpty;
+      final removed = hadBadge && !r.eligible;
+      tx.update(userRef, {
+        'avgRating': (r.avgRating * 10).round() / 10,
+        'completedTransactions': r.completed,
+        'completionRate': r.completionRate,
+        'trustedBadgeEligible': r.eligible,
+        'trustedOpenReports': r.openReports,
+        'trustedEligibilityNotified': r.eligible && (notified || notifyAdmins),
+        'trustedBadge': r.eligible && hadBadge,
+      });
+      if (notifyAdmins) {
+        final rawName = data['name'] as String? ?? '';
+        final name = rawName.isNotEmpty
+            ? rawName
+            : (data['email'] as String? ?? 'A seller');
+        for (final a in admins.docs) {
+          tx.set(_notificationItems(a.id).doc(), {
+            'type': NotificationType.system.value,
+            'message': '$name meets the Trusted Seller requirements. Review '
+                'their User Details before awarding the badge.',
+            'relatedId': 'trust:$uid',
+            'read': false,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+      }
+      if (removed) {
+        tx.set(_notificationItems(uid).doc(), {
+          'type': NotificationType.system.value,
+          'message': 'Your Trusted Seller badge was removed because your '
+              'account no longer meets the eligibility requirements.',
+          'relatedId': 'trust:$uid',
+          'read': false,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
+    return review;
+  }
+
+  /// Best-effort [recomputeTrust] after a deal / report change; never fails
+  /// the action that triggered it.
+  Future<void> _refreshTrustQuietly(String uid) async {
+    try {
+      await recomputeTrust(uid);
+    } catch (e) {
+      debugPrint('recomputeTrust $uid: $e');
     }
-    final avg =
-        snap.docs.isEmpty ? 0.0 : (sum / snap.docs.length * 10).round() / 10;
-    await _users.doc(uid).update({'avgRating': avg});
+  }
+
+  /// Seller whose Trusted status a report on [type]/[targetId] affects.
+  Future<String> _trustOwnerOfReportTarget(
+    ReportTargetType type,
+    String targetId,
+  ) async {
+    if (targetId.isEmpty) return '';
+    switch (type) {
+      case ReportTargetType.user:
+        return targetId;
+      case ReportTargetType.listing:
+        final d = await _listings.doc(targetId).get();
+        return d.data()?['sellerId'] as String? ?? '';
+      case ReportTargetType.rating:
+        final d = await _ratings.doc(targetId).get();
+        return d.data()?['ratedUserId'] as String? ?? '';
+    }
+  }
+
+  Future<void> _refreshTrustForReport(
+    ReportTargetType type,
+    String targetId,
+  ) async {
+    try {
+      await _refreshTrustQuietly(
+        await _trustOwnerOfReportTarget(type, targetId),
+      );
+    } catch (e) {
+      debugPrint('refreshTrustForReport: $e');
+    }
+  }
+
+  Future<void> _refreshTrustForDeal(String transactionId) async {
+    try {
+      final d = await _transactions.doc(transactionId).get();
+      await _refreshTrustQuietly(d.data()?['sellerId'] as String? ?? '');
+    } catch (e) {
+      debugPrint('refreshTrustForDeal: $e');
+    }
   }
 
   static int _compareNullableDates(DateTime? a, DateTime? b) {
@@ -1220,8 +1412,19 @@ class FirestoreService {
   Future<void> updateReportStatus(
     String reportId,
     ReportStatus status,
-  ) =>
-      _reports.doc(reportId).update({'status': status.value});
+  ) async {
+    await _reports.doc(reportId).update({'status': status.value});
+    try {
+      final d = await _reports.doc(reportId).get();
+      final data = d.data();
+      if (data != null) {
+        final r = ReportModel.fromMap(d.id, data);
+        await _refreshTrustForReport(r.targetType, r.targetId);
+      }
+    } catch (e) {
+      debugPrint('updateReportStatus trust refresh: $e');
+    }
+  }
 
   /// Admin moderation. Re-activating also clears any fee hold (manual
   /// flag + hidden listings); the automatic hold re-applies at the next
@@ -1571,6 +1774,7 @@ class FirestoreService {
     final wasUnpaid = (data['feeStatus'] as String? ?? 'none') == 'unpaid';
     if (wasUnpaid) update['feeStatus'] = 'void';
     await _transactions.doc(transactionId).update(update);
+    await _refreshTrustQuietly(data['sellerId'] as String? ?? '');
     // A voided overdue fee may be what held the seller.
     if (wasUnpaid) {
       try {

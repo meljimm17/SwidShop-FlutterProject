@@ -214,13 +214,13 @@ class AdminDashboardScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '${a.pendingQueueCount} report${a.pendingQueueCount == 1 ? '' : 's'} pending',
+                          'Transaction disputes awaiting review',
                           style: const TextStyle(
                             fontSize: 11.5,
                             color: AppColors.gray,
                           ),
                         ),
-                        if (disputes + a.pendingQueueCount > 0) ...[
+                        if (disputes > 0) ...[
                           const SizedBox(height: 6),
                           const SoftPill('Needs Review', color: AppColors.red),
                         ],
@@ -229,6 +229,24 @@ class AdminDashboardScreen extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _StatCard(
+            label: 'Pending Reports',
+            icon: Icons.outlined_flag,
+            iconColor: a.pendingQueueCount > 0
+                ? AppColors.red
+                : AppColors.teal,
+            value: '${a.pendingQueueCount}',
+            valueColor:
+                a.pendingQueueCount > 0 ? AppColors.red : AppColors.ink,
+            onTap: () => AdminShell.goTo(context, AdminSection.reports),
+            footer: Text(
+              a.pendingQueueCount == 0
+                  ? 'No reports awaiting review'
+                  : 'Open user and listing reports · tap to review',
+              style: const TextStyle(fontSize: 11.5, color: AppColors.gray),
             ),
           ),
           const SizedBox(height: 16),

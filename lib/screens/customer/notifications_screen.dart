@@ -11,6 +11,7 @@ import '../../services/firestore_service.dart';
 import '../../widgets/app_card_wrapper.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/top_app_bar.dart';
+import '../admin/admin_users_screen.dart';
 import '../seller/monitor_bidding_screen.dart';
 import '../seller/swap_offers_screen.dart';
 import '../shared/transaction_chat_screen.dart';
@@ -307,6 +308,13 @@ void openNotificationTarget(
       if (link.kind == 'role') next = const ProfileScreen();
       if (link.kind == 'listing' && link.id.isNotEmpty) {
         next = ListingDetailScreen(listingId: link.id);
+      }
+      if (link.kind == 'trust' && link.id.isNotEmpty) {
+        if (role == UserRole.admin) {
+          openAdminUserDetail(context, link.id);
+          return;
+        }
+        next = const ProfileScreen();
       }
   }
   // Sellers tapping a listing link land on the auction monitor instead.

@@ -69,9 +69,13 @@ const List<TermsSection> termsSections = [
   TermsSection('7. Ratings and the Trusted badge', [
     'After a transaction, both members can leave a rating. Ratings must be '
         'honest and about that transaction only.',
-    'The Trusted badge is awarded automatically to members with at least 5 '
-        'completed transactions, a completion rate of 90% or higher, and an '
-        'average rating of 4.5 or higher. It is removed if they drop below.',
+    'Trusted Seller eligibility requires at least 10 completed seller '
+        'transactions, a completion rate of 90% or higher, an average rating '
+        'of 4.5 or higher, and no unresolved reports against the account, its '
+        'listings, or its ratings.',
+    'Eligibility is checked automatically. An admin reviews the seller’s '
+        'account details before awarding the badge. The badge is removed if '
+        'the seller no longer meets the requirements.',
   ]),
   TermsSection('8. Conduct, reports and enforcement', [
     'Be respectful. No harassment, hate speech, spam, scams, or attempts to '

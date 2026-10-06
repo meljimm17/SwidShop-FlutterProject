@@ -26,20 +26,25 @@ import 'rate_sheet.dart';
 /// Basic version shared by seller screens; the full Phase 3.8 screen builds
 /// on this.
 class TransactionChatScreen extends StatefulWidget {
-  const TransactionChatScreen({super.key, required this.transactionId});
+  const TransactionChatScreen({
+    super.key,
+    required this.transactionId,
+    this.firestoreService,
+  });
 
   final String transactionId;
+  final FirestoreService? firestoreService;
 
   @override
   State<TransactionChatScreen> createState() => _TransactionChatScreenState();
 }
 
 class _TransactionChatScreenState extends State<TransactionChatScreen> {
-  final _firestore = FirestoreService();
+  late final _firestore = widget.firestoreService ?? FirestoreService();
   final _textCtrl = TextEditingController();
   late final Stream<TransactionModel?> _txn =
       _firestore.streamTransaction(widget.transactionId);
-  late final Stream<List<ChatMessageModel>> _messages =
+  late Stream<List<ChatMessageModel>> _messages =
       _firestore.streamMessages(widget.transactionId);
   bool _sending = false;
 
@@ -48,6 +53,12 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
 
   /// Guards the one-time rating prompt per completed deal.
   String? _promptedFor;
+
+  void _retryMessages() {
+    setState(() {
+      _messages = _firestore.streamMessages(widget.transactionId);
+    });
+  }
 
   @override
   void dispose() {
@@ -118,6 +129,16 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       picked = await ImagePicker().pickImage(source: source);
     } catch (e) {
       debugPrint('pickChatPhoto: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Could not open the camera or gallery. Check permissions and try again.',
+            ),
+            backgroundColor: AppColors.red,
+          ),
+        );
+      }
       return;
     }
     if (picked == null || !mounted) return;
@@ -246,6 +267,16 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       }
     } catch (e) {
       debugPrint('updateTransactionStatus: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Deal status could not be updated. Please try again.',
+            ),
+            backgroundColor: AppColors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -648,6 +679,38 @@ class _TransactionChatScreenState extends State<TransactionChatScreen> {
       stream: _messages,
       builder: (context, snap) {
         final msgs = snap.data ?? const <ChatMessageModel>[];
+        if (snap.hasError && msgs.isEmpty) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.cloud_off_outlined,
+                    size: 36,
+                    color: AppColors.gray,
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    "Couldn't load messages.",
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Check your connection and try again.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppColors.gray),
+                  ),
+                  TextButton(
+                    onPressed: _retryMessages,
+                    child: const Text('Try again'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
         if (snap.connectionState == ConnectionState.waiting && msgs.isEmpty) {
           return const Center(child: CircularProgressIndicator());
         }

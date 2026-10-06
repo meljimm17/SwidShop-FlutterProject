@@ -5,9 +5,11 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
 
+import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/listing_model.dart';
+import '../../models/trust_review.dart';
 import '../../models/report_model.dart';
 import '../../models/transaction_model.dart';
 import '../../models/user_model.dart';
@@ -612,6 +614,37 @@ class AdminUserDetailScreen extends StatefulWidget {
 class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
   bool _busy = false;
 
+  Future<void> _awardTrustedBadge(UserModel user) async {
+    final ok = await confirmAdminAction(
+      context,
+      title: 'Award Trusted Seller badge?',
+      message:
+          'The eligibility check confirms this seller has at least '
+          '${AppConstants.trustedMinCompletedTransactions} completed deals, '
+          'a ${(AppConstants.trustedMinCompletionRate * 100).round()}% or '
+          'higher completion rate, a ${AppConstants.trustedMinAvgRating}+ '
+          'average rating, and no unresolved reports. Awarding the badge '
+          'notifies the seller.',
+      confirmLabel: 'Award badge',
+      destructive: false,
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await context.read<AdminProvider>().firestore.awardTrustedBadge(user.uid);
+    } catch (e) {
+      debugPrint('awardTrustedBadge: $e');
+      if (mounted) {
+        showAdminError(
+          context,
+          e is StateError ? e.message : 'Could not award the badge. Try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _status(UserModel user, AccountStatus status) async {
     setState(() => _busy = true);
     await setAccountStatusFlow(context, user, status);
@@ -697,6 +730,10 @@ class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
                 ),
                 const SizedBox(height: 10),
                 _profileCard(user, pending.length),
+                if (user.role.canSell) ...[
+                  const SizedBox(height: 12),
+                  _trustedReviewCard(user),
+                ],
                 const SizedBox(height: 22),
                 _sectionHeader(
                   Icons.outlined_flag,
@@ -760,6 +797,25 @@ class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (user.trustedBadgeEligible && !user.trustedBadge)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: FilledButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _awardTrustedBadge(user),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: AppColors.teal,
+                              shape: const StadiumBorder(),
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                            ),
+                            icon: const Icon(Icons.verified_outlined),
+                            label: const Text('Award Trusted Seller Badge'),
+                          ),
+                        ),
+                      ),
                     if (user.accountStatus == AccountStatus.active)
                       Row(
                         children: [
@@ -835,6 +891,103 @@ class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
             ),
     );
   }
+
+  Widget _trustedReviewCard(UserModel user) {
+    final badge = user.trustedBadge;
+    final eligible = user.trustedBadgeEligible;
+    final status = badge
+              ? 'Badge awarded'
+              : eligible
+              ? 'Eligible · admin review'
+              : 'Not currently eligible';
+    final color = badge || eligible ? AppColors.teal : AppColors.gray;
+    final check = TrustReview(
+      isSeller: true,
+      avgRating: user.avgRating,
+      completed: user.completedTransactions,
+      completionRate: user.completionRate,
+      openReports: user.trustedOpenReports,
+    );
+
+    return AdminCard(
+            radius: 18,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Trusted Seller Review',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    SoftPill(
+                      status,
+                      color: color,
+                      icon: badge ? Icons.verified : Icons.fact_check_outlined,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                _trustMetric(
+                  'Completed seller deals',
+                  '${user.completedTransactions} / '
+                      '${AppConstants.trustedMinCompletedTransactions}+',
+                  check.meetsDeals,
+                ),
+                _trustMetric(
+                  'Completion rate',
+                  '${(user.completionRate * 100).toStringAsFixed(0)}% / '
+                      '${(AppConstants.trustedMinCompletionRate * 100).toStringAsFixed(0)}%+',
+                  check.meetsCompletionRate,
+                ),
+                _trustMetric(
+                  'Average rating',
+                  '${user.avgRating.toStringAsFixed(1)} / '
+                      '${AppConstants.trustedMinAvgRating}+',
+                  check.meetsRating,
+                ),
+                _trustMetric(
+                  'Unresolved reports',
+                  '${user.trustedOpenReports} / 0',
+                  check.meetsReports,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Eligibility is checked from completed deals, ratings, and open '
+                  'reports. An admin must award the badge after reviewing these '
+                  'details.',
+                  style: TextStyle(fontSize: 12, color: AppColors.gray),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _trustMetric(String label, String value, bool ok) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+            children: [
+              Icon(
+                ok ? Icons.check_circle : Icons.cancel_outlined,
+                size: 16,
+                color: ok ? AppColors.green : AppColors.red,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(fontSize: 12.5, color: AppColors.gray),
+                ),
+              ),
+              Text(
+                value,
+                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+              ),
+            ],
+    ),
+  );
 
   Widget _profileCard(UserModel user, int pending) {
     final region = [

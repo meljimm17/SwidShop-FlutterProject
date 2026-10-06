@@ -7,9 +7,9 @@
 // - Every doc uses a deterministic `seed-*` id, so re-runs OVERWRITE
 //   instead of duplicating. Safe to run twice.
 // - Aggregates are DERIVED, not invented: completedTransactions counts real
-//   completed seller txns, avgRating is the mean of real seeded ratings, and
-//   trustedBadge follows the same thresholds as functions/index.js
-//   (>=5 completed, >=0.9 completion rate, >=4.5 avg).
+//   completed seller txns and avgRating is the mean of real seeded ratings.
+//   Enrico Ocampo has 10 completed deals so the Cloud Function can flag him
+//   for admin review; seeded users never receive the badge automatically.
 // - Timestamps spread over the past ~8 weeks so weekly charts, growth and
 //   monthly bars all have real data.
 // - Listing/avatar photos are real uploads into YOUR Cloudinary (unsigned
@@ -213,6 +213,9 @@ async function main() {
     completedTransactions: N(u.done),
     completionRate: N(u.rate),
     trustedBadge: B(u.trusted),
+    trustedBadgeEligible: B(false),
+    trustedOpenReports: N(0),
+    trustedEligibilityNotified: B(false),
     profileComplete: B(true),
     accountStatus: S(u.status),
     favorites: A([]),
@@ -384,7 +387,12 @@ async function main() {
   for (let k = 0; k < Math.min(openStates.length, actives.length); k++) {
     const l = actives[k];
     const buyer = pick(buyers.filter((x) => x.uid !== l.seller.uid));
-    await addTxn({ listingId: l.id, buyerId: buyer.uid, sellerId: l.seller.uid, type: l.type === 'swap' ? 'swap' : l.type, amount: l.type === 'bid' ? (l.topBid || l.startBid) : l.price, title: titleOf(l), image: img(l), status: openStates[k], created: daysAgo(0, 10) });
+    const status =
+      l.seller.name === 'Enrico Ocampo' &&
+      ['disputed', 'cancelled'].includes(openStates[k])
+        ? 'ongoing'
+        : openStates[k];
+    await addTxn({ listingId: l.id, buyerId: buyer.uid, sellerId: l.seller.uid, type: l.type === 'swap' ? 'swap' : l.type, amount: l.type === 'bid' ? (l.topBid || l.startBid) : l.price, title: titleOf(l), image: img(l), status, created: daysAgo(0, 10) });
   }
   console.log(`transactions: ${txns.length} (+ chat threads)`);
 
@@ -434,9 +442,11 @@ async function main() {
   // ratings: buyer rates seller on every completed deal (+ some sellers rate back)
   let rateN = 0;
   const starsByUser = {};
+  const ratingOwners = {};
   for (const t of txns.filter((x) => x.status === 'completed')) {
     rateN++;
     const rid = `seed-rating-${String(rateN).padStart(2, '0')}`;
+    ratingOwners[rid] = t.sellerId;
     const stars = pick([4, 4, 4, 5, 5, 5, 5, 3]);
     (starsByUser[t.sellerId] = starsByUser[t.sellerId] || []).push(stars);
     await put('ratings', rid, {
@@ -457,7 +467,13 @@ async function main() {
     ['user', users[9].uid, REASONS[3]],
     ['listing', listings[5].id, REASONS[0]],
     ['listing', listings[20].id, REASONS[2]],
-    ['rating', 'seed-rating-01', 'Fake review from a friend'],
+    [
+      'rating',
+      Object.keys(ratingOwners).find(
+        (id) => ratingOwners[id] !== users.find((u) => u.name === 'Enrico Ocampo')?.uid,
+      ) || Object.keys(ratingOwners)[0],
+      'Fake review from a friend',
+    ],
   ];
   let repN = 0;
   for (const [kind, target, reason] of pendingTargets) {
@@ -485,9 +501,9 @@ async function main() {
   });
   console.log(`reports: ${repN} (5 pending)`);
 
-  // 5b. Concentration pass: focus sellers get 6+ completed deals each so
-  // Trusted badges honestly emerge; plus 3 finished swaps. Fixed `b`
-  // id-range keeps re-runs stable.
+  // 5b. Concentration pass: the focus sellers get six completed deals;
+  // Enrico Ocampo gets ten for the Trusted Seller admin-review demo.
+  // Plus three finished swaps. Fixed `b` id-range keeps re-runs stable.
   let txnB = 0;
   let rateB = 0;
   let offerB = 0;
@@ -516,7 +532,8 @@ async function main() {
     const pool = mineSold.length > 0
         ? mineSold
         : listings.filter((x) => x.seller.uid === s.uid);
-    for (let k = have; k < 6; k++) {
+    const targetDeals = s.name === 'Enrico Ocampo' ? 10 : 6;
+    for (let k = have; k < targetDeals; k++) {
       const l = pool[k % pool.length];
       if (l.status !== 'sold') {
         l.status = 'sold';
@@ -559,13 +576,19 @@ async function main() {
         listingId: S(l.id),
         createdAt: TS(t.created),
       });
-      await addRatingFor(t, pick([4, 5, 5, 5, 5]));
+      await addRatingFor(t, s.name === 'Enrico Ocampo' ? 5 : pick([4, 5, 5, 5, 5]));
     }
   }
-  console.log(`boost txns: ${txnB} (focus sellers to 6+ completed)`);
+  console.log(`boost txns: ${txnB} (Enrico Ocampo to 10 completed)`);
   // finished swaps: first 3 active swap listings → sold + accepted + done
+  const enricoUid = users.find((u) => u.name === 'Enrico Ocampo')?.uid;
   const swapTodo = listings
-    .filter((x) => x.type === 'swap' && x.status === 'active')
+    .filter(
+      (x) =>
+        x.type === 'swap' &&
+        x.status === 'active' &&
+        x.seller.uid !== enricoUid,
+    )
     .slice(0, 3);
   for (const l of swapTodo) {
     l.status = 'sold';
@@ -640,7 +663,7 @@ async function main() {
     u.avg = avg;
     u.done = done;
     u.rate = rate;
-    u.trusted = done >= 5 && rate >= 0.9 && avg >= 4.5;
+    u.trusted = false;
     await put('users', u.uid, userDoc(u));
   }
   const trusted = users.filter((u) => u.trusted).length;
