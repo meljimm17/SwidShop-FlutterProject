@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
 import '../../models/notification_model.dart';
+import '../../models/user_model.dart';
 import '../../providers/admin_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
@@ -20,9 +21,11 @@ import 'admin_role_requests_screen.dart';
 import 'admin_transactions_screen.dart';
 import 'admin_users_screen.dart';
 import 'admin_widgets.dart';
+import 'superadmin_accounts_screen.dart';
+import 'superadmin_audit_screen.dart';
+import 'superadmin_settings_screen.dart';
 
-/// Admin sections. The first five are on the bottom bar; Ratings and
-/// Categories open from the ☰ drawer (bottom bar stays visible).
+/// Admin sections, plus tools visible only to superadmins.
 enum AdminSection {
   dashboard('Dashboard'),
   users('Users'),
@@ -31,7 +34,10 @@ enum AdminSection {
   reports('Reports'),
   ratings('Ratings & Reviews'),
   categories('Categories'),
-  roleRequests('Role Requests');
+  roleRequests('Role Requests'),
+  adminAccounts('Manage Admin Accounts'),
+  systemSettings('Configure System Settings'),
+  auditLogs('View System Audit Logs');
 
   const AdminSection(this.title);
 
@@ -47,12 +53,14 @@ class AdminShell extends StatelessWidget {
     super.key,
     this.initial = AdminSection.dashboard,
     this.firestoreService,
+    this.sharedProvider,
   });
 
   final AdminSection initial;
 
   /// Test hook; production uses the real service.
   final FirestoreService? firestoreService;
+  final AdminProvider? sharedProvider;
 
   /// Switches the enclosing shell's section (no-op outside a shell).
   static void goTo(BuildContext context, AdminSection section) =>
@@ -61,10 +69,15 @@ class AdminShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AdminGate(
-      child: ChangeNotifierProvider(
-        create: (_) => AdminProvider(firestoreService: firestoreService),
-        child: _AdminFrame(initial: initial),
-      ),
+      child: sharedProvider == null
+          ? ChangeNotifierProvider(
+              create: (_) => AdminProvider(firestoreService: firestoreService),
+              child: _AdminFrame(initial: initial),
+            )
+          : ChangeNotifierProvider.value(
+              value: sharedProvider!,
+              child: _AdminFrame(initial: initial),
+            ),
     );
   }
 }
@@ -102,14 +115,22 @@ class _AdminFrameState extends State<_AdminFrame> {
     AdminSection.ratings => const AdminRatingsScreen(),
     AdminSection.categories => const AdminCategoriesScreen(),
     AdminSection.roleRequests => const AdminRoleRequestsScreen(),
+    AdminSection.adminAccounts => const SuperadminGate(
+      child: SuperadminAccountsScreen(),
+    ),
+    AdminSection.systemSettings => const SuperadminGate(
+      child: SuperadminSettingsScreen(),
+    ),
+    AdminSection.auditLogs => const SuperadminGate(
+      child: SuperadminAuditScreen(),
+    ),
   };
 
   @override
   Widget build(BuildContext context) {
     final admin = context.watch<AdminProvider>();
     final me = context.watch<AuthProvider>().profile;
-    final adminUid =
-        context.watch<AuthProvider>().firebaseUser?.uid ?? '';
+    final adminUid = context.watch<AuthProvider>().firebaseUser?.uid ?? '';
     final queue = admin.pendingQueueCount;
 
     return PopScope(
@@ -146,7 +167,9 @@ class _AdminFrameState extends State<_AdminFrame> {
                   : admin.firestore.streamNotifications(adminUid),
               builder: (context, snapshot) {
                 final unread =
-                    snapshot.data?.where((notification) => !notification.read).length ??
+                    snapshot.data
+                        ?.where((notification) => !notification.read)
+                        .length ??
                     0;
                 return IconButton(
                   tooltip: 'Admin notifications',
@@ -177,10 +200,7 @@ class _AdminFrameState extends State<_AdminFrame> {
                 isLabelVisible: queue > 0,
                 backgroundColor: AppColors.red,
                 label: Text(queue > 9 ? '9+' : '$queue'),
-                child: const Icon(
-                  Icons.outlined_flag,
-                  color: AppColors.ink,
-                ),
+                child: const Icon(Icons.outlined_flag, color: AppColors.ink),
               ),
             ),
             Padding(
@@ -242,6 +262,8 @@ class _AdminFrameState extends State<_AdminFrame> {
   }
 
   Widget _drawer(AdminProvider admin) {
+    final isSuperadmin =
+        context.watch<AuthProvider>().profile?.role == UserRole.superadmin;
     Widget item(AdminSection s, IconData icon, {int count = 0}) {
       final selected = _section == s;
       return Padding(
@@ -384,6 +406,18 @@ class _AdminFrameState extends State<_AdminFrame> {
                 },
               ),
             ),
+            if (isSuperadmin) ...[
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                child: Divider(color: AppColors.line),
+              ),
+              item(
+                AdminSection.adminAccounts,
+                Icons.admin_panel_settings_outlined,
+              ),
+              item(AdminSection.systemSettings, Icons.tune_outlined),
+              item(AdminSection.auditLogs, Icons.history_outlined),
+            ],
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
               child: Divider(color: AppColors.line),

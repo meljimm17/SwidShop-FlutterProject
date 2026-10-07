@@ -45,12 +45,14 @@ class _FakeFirestore implements FirestoreService {
     required this.listings,
     required this.txns,
     required this.reports,
+    this.payments = const [],
   });
 
   final List<UserModel> users;
   final List<ListingModel> listings;
   final List<TransactionModel> txns;
   final List<ReportModel> reports;
+  final List<PaymentModel> payments;
 
   @override
   Stream<UserModel?> streamUser(String uid) =>
@@ -69,7 +71,7 @@ class _FakeFirestore implements FirestoreService {
   Stream<List<ReportModel>> streamAllReports() => Stream.value(reports);
 
   @override
-  Stream<List<PaymentModel>> streamAllPayments() => Stream.value(const []);
+  Stream<List<PaymentModel>> streamAllPayments() => Stream.value(payments);
 
   @override
   Stream<List<PartnerAdModel>> streamAllPartnerAds() => Stream.value(const []);
@@ -446,6 +448,16 @@ void main() {
       listings: listings,
       txns: txns,
       reports: reports,
+      payments: [
+        PaymentModel(
+          userId: 'u2',
+          type: PaymentType.photoPack,
+          amount: 99,
+          label: 'Photo Pack · 8 photos',
+          referenceNo: 'SWD-TEST01',
+          createdAt: now,
+        ),
+      ],
     );
 
     await tester.pumpWidget(
@@ -524,6 +536,9 @@ void main() {
     await drawer('Fees');
     await tester.pump(const Duration(milliseconds: 400));
     expect(tester.takeException(), isNull);
+    expect(find.textContaining('Recent Payments (1)'), findsOneWidget);
+    expect(find.text('Photo Pack · 8 photos'), findsOneWidget);
+    expect(find.text('Ref SWD-TEST01'), findsOneWidget);
     expect(find.textContaining('Unpaid ('), findsOneWidget);
     Navigator.of(tester.element(find.textContaining('Unpaid ('))).pop();
     await tester.pump();

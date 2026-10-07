@@ -149,10 +149,17 @@ class _ProposeSwapScreenState extends State<ProposeSwapScreen> {
   }
 
   Future<void> _propose(ListingModel target) async {
-    final uid = context.read<AuthProvider>().firebaseUser?.uid ?? '';
-    final source = _sourceFor(
-      context.read<AuthProvider>().profile?.role.canSell ?? false,
-    );
+    final auth = context.read<AuthProvider>();
+    final uid = auth.firebaseUser?.uid ?? '';
+    if (auth.profile?.role.canUseMarketplace == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Administrator accounts cannot make swap offers.'),
+        ),
+      );
+      return;
+    }
+    final source = _sourceFor(auth.profile?.role.canSell ?? false);
     if (uid.isEmpty || !_readyFor(source) || _busy) return;
     FocusScope.of(context).unfocus();
     setState(() => _busy = true);

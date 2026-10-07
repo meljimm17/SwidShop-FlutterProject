@@ -165,6 +165,12 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
               'Customer + Seller (${roles[UserRole.both]})',
             ),
             PillOption(UserRole.admin, 'Admin (${roles[UserRole.admin]})'),
+            if (context.watch<AuthProvider>().profile?.role ==
+                UserRole.superadmin)
+              PillOption(
+                UserRole.superadmin,
+                'Superadmin (${roles[UserRole.superadmin]})',
+              ),
           ],
         ),
         const SizedBox(height: 14),
@@ -308,7 +314,8 @@ class _UserCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final me = context.read<AuthProvider>().firebaseUser?.uid;
-    final isAdmin = user.role == UserRole.admin;
+    final isAdmin =
+        user.role == UserRole.admin || user.role == UserRole.superadmin;
     final banned = user.accountStatus == AccountStatus.banned;
     final statusLabel = switch (user.accountStatus) {
       AccountStatus.active => isAdmin ? 'Active Staff' : 'Active',
@@ -696,8 +703,10 @@ class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
     final txns = a.transactions
         .where((t) => t.buyerId == widget.uid || t.sellerId == widget.uid)
         .toList();
-    final canModerate =
-        user != null && user.role != UserRole.admin && user.uid != me;
+    final canModerate = user != null &&
+        user.role != UserRole.admin &&
+        user.role != UserRole.superadmin &&
+        user.uid != me;
 
     return Scaffold(
       backgroundColor: AppColors.paper,

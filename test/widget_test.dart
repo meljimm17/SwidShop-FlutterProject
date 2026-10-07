@@ -193,6 +193,7 @@ void main() {
       expect(Validators.phMobile('917 123 4567'), isNull);
       expect(Validators.phMobile('8171234567'), isNotNull);
       expect(Validators.phMobile('917123456'), isNotNull);
+      expect(Validators.phMobile('917abc1234567'), isNotNull);
       expect(Validators.phMobile(''), isNotNull);
     });
 
@@ -200,6 +201,22 @@ void main() {
       expect(Validators.phPostalCode('1101'), isNull);
       expect(Validators.phPostalCode('110'), isNotNull);
       expect(Validators.phPostalCode('11a1'), isNotNull);
+    });
+
+    test('price range rejects malformed, negative and reversed bounds', () {
+      expect(Validators.priceRange('100', '500'), isNull);
+      expect(Validators.priceRange('', '500'), isNull);
+      expect(Validators.priceRange('one hundred', '500'), isNotNull);
+      expect(Validators.priceRange('-1', '500'), isNotNull);
+      expect(Validators.priceRange('600', '500'), contains('greater'));
+      expect(Validators.priceRange('NaN', ''), isNotNull);
+    });
+
+    test('positive numeric fields reject NaN and infinity', () {
+      expect(Validators.positiveNumber('10'), isNull);
+      expect(Validators.positiveNumber('-1'), isNotNull);
+      expect(Validators.positiveNumber('NaN'), isNotNull);
+      expect(Validators.positiveNumber('Infinity'), isNotNull);
     });
 
     test('newPassword needs 8+ chars with a letter and a number', () {

@@ -65,9 +65,9 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     try {
       await context.read<AuthProvider>().signIn(
-            email: _emailCtrl.text,
-            password: _passwordCtrl.text,
-          );
+        email: _emailCtrl.text,
+        password: _passwordCtrl.text,
+      );
       if (mounted) await goAfterAuth(context);
     } catch (e) {
       if (!mounted) return;
@@ -138,7 +138,8 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _forgotPassword() async {
     final email = await showDialog<String>(
       context: context,
-      builder: (_) => _ResetPasswordDialog(initialEmail: _emailCtrl.text.trim()),
+      builder: (_) =>
+          _ResetPasswordDialog(initialEmail: _emailCtrl.text.trim()),
     );
     if (email == null || !mounted) return;
     try {
@@ -193,9 +194,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
     return Scaffold(
       backgroundColor: AppColors.cream,
-      appBar: canPop
-          ? AppBar(backgroundColor: AppColors.cream)
-          : null,
+      appBar: canPop ? AppBar(backgroundColor: AppColors.cream) : null,
       body: SafeArea(
         child: SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(24, canPop ? 0 : 32, 24, 24),
@@ -215,10 +214,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 24),
                 Text(
                   'Welcome back',
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                        color: AppColors.ink,
-                        letterSpacing: -0.5,
-                      ),
+                  style: Theme.of(context).textTheme.headlineMedium
+                      ?.copyWith(color: AppColors.ink, letterSpacing: -0.5),
                 ),
                 const SizedBox(height: 6),
                 const Text(
@@ -309,10 +306,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       onPressed: anyBusy
                           ? null
                           : () => Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => const RegisterScreen(),
-                                ),
+                              MaterialPageRoute(
+                                builder: (_) => const RegisterScreen(),
                               ),
+                            ),
                       child: const Text(
                         'Register',
                         style: TextStyle(fontWeight: FontWeight.w700),
@@ -343,9 +340,11 @@ class _LoginScreenState extends State<LoginScreen> {
                               height: 14,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.admin_panel_settings_outlined,
-                              size: 18),
-                      label: const Text('Admin login'),
+                          : const Icon(
+                              Icons.admin_panel_settings_outlined,
+                              size: 18,
+                            ),
+                      label: const Text('Login as Administrator'),
                     ),
                   ),
               ],
@@ -357,8 +356,8 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-/// Username + password prompt for the admin account. Checks the
-/// credentials locally first so a typo never reaches Firebase.
+/// Username + password prompt for administrator accounts. Checks the
+/// demo credentials locally first so a typo never reaches Firebase.
 class _AdminLoginDialog extends StatefulWidget {
   const _AdminLoginDialog();
 
@@ -386,8 +385,8 @@ class _AdminLoginDialogState extends State<_AdminLoginDialog> {
       setState(() => _error = 'Enter the username and password.');
       return;
     }
-    if (!AuthService.isAdminLogin(user, pass)) {
-      setState(() => _error = 'Incorrect admin username or password.');
+    if (!AuthService.isAdministratorLogin(user, pass)) {
+      setState(() => _error = 'Incorrect administrator username or password.');
       return;
     }
     Navigator.of(context).pop((user, pass));
@@ -397,7 +396,7 @@ class _AdminLoginDialogState extends State<_AdminLoginDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       backgroundColor: AppColors.surface,
-      title: const Text('Admin login'),
+      title: const Text('Login as Administrator'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -530,10 +529,7 @@ class _ResetPasswordDialogState extends State<_ResetPasswordDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        TextButton(
-          onPressed: _submit,
-          child: const Text('Send link'),
-        ),
+        TextButton(onPressed: _submit, child: const Text('Send link')),
       ],
     );
   }

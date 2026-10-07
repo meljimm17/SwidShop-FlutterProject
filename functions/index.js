@@ -27,7 +27,15 @@ const TRUST = {
  * the badge itself requires an admin decision in User Details.
  */
 async function recomputeTrust(uid) {
-  const [userSnap, ratingsSnap, txnsSnap, listingsSnap, reportsSnap, adminsSnap] =
+  const [
+    userSnap,
+    ratingsSnap,
+    txnsSnap,
+    listingsSnap,
+    reportsSnap,
+    adminsSnap,
+    superadminsSnap,
+  ] =
     await Promise.all([
       db.collection("users").doc(uid).get(),
       db.collection("ratings").where("ratedUserId", "==", uid).get(),
@@ -35,6 +43,7 @@ async function recomputeTrust(uid) {
       db.collection("listings").where("sellerId", "==", uid).get(),
       db.collection("reports").where("status", "==", "pending").get(),
       db.collection("users").where("role", "==", "admin").get(),
+      db.collection("users").where("role", "==", "superadmin").get(),
     ]);
   if (!userSnap.exists) return null;
 
@@ -72,7 +81,8 @@ async function recomputeTrust(uid) {
     avgRating >= TRUST.minAvgRating &&
     openReports === 0;
   const userRef = db.collection("users").doc(uid);
-  const adminNotifications = adminsSnap.docs.map((doc) => ({
+  const staffDocs = [...adminsSnap.docs, ...superadminsSnap.docs];
+  const adminNotifications = staffDocs.map((doc) => ({
     ref: db
       .collection("notifications")
       .doc(doc.id)
@@ -99,7 +109,7 @@ async function recomputeTrust(uid) {
     const trustedBadge = eligible ? hadBadge : false;
     notifyAdmins = eligible &&
       latestData.trustedEligibilityNotified !== true &&
-      adminsSnap.size > 0;
+      staffDocs.length > 0;
     badgeRemoved = hadBadge && !eligible;
 
     transaction.set(
@@ -174,7 +184,8 @@ exports.computeTrustBadge = onCall(async (request) => {
   }
   if (uid !== request.auth.uid) {
     const caller = await db.collection("users").doc(request.auth.uid).get();
-    if (!caller.exists || caller.get("role") !== "admin") {
+    if (!caller.exists ||
+        !["admin", "superadmin"].includes(caller.get("role"))) {
       throw new HttpsError("permission-denied", "Only admins can review another account.");
     }
   }
@@ -250,7 +261,8 @@ exports.onUserWritten = onDocumentWritten("users/{uid}", async (event) => {
     [...changed].every((key) => TRUST_MANAGED_FIELDS.has(key));
   if (!trustOnly) await recomputeTrust(event.params.uid);
 
-  if (after.role === "admin" && before?.role !== "admin") {
+  if (["admin", "superadmin"].includes(after.role) &&
+      !["admin", "superadmin"].includes(before?.role)) {
     const candidates = await db
       .collection("users")
       .where("trustedBadgeEligible", "==", true)

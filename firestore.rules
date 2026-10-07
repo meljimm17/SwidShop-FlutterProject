@@ -44,7 +44,57 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && exists(userPath(uid())) &&
-        get(userPath(uid())).data.get('role', '') == 'admin';
+        get(userPath(uid())).data.get('role', '') in ['admin', 'superadmin'];
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && exists(userPath(uid())) &&
+        get(userPath(uid())).data.get('role', '') == 'superadmin';
+    }
+
+    function isMarketplaceUser() {
+      return isSignedIn() && exists(userPath(uid())) &&
+        get(userPath(uid())).data.get('role', '') in
+          ['customer', 'both', 'seller'];
+    }
+
+    function isMarketplaceSeller() {
+      return isSignedIn() && exists(userPath(uid())) &&
+        get(userPath(uid())).data.get('role', '') in ['both', 'seller'];
+    }
+
+    function managedAdminRoleChange(userId) {
+      let before = resource.data.get('role', '');
+      let after = request.resource.data.get('role', '');
+      return isSuperAdmin() && userId != uid() &&
+        before != 'superadmin' && after != 'superadmin' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['role', 'roleBeforeAdmin']) &&
+        ((after == 'admin' && before in ['customer', 'both', 'seller'] &&
+            request.resource.data.get('roleBeforeAdmin', '') == before) ||
+         (before == 'admin' && after in ['customer', 'both'] &&
+            (request.resource.data.get('roleBeforeAdmin', null) == null ||
+             request.resource.data.get('roleBeforeAdmin', null) == after ||
+             (request.resource.data.get('roleBeforeAdmin', null) == 'seller' &&
+              after == 'both'))));
+    }
+
+    function approvedRoleRequestChange(userId) {
+      let path = /databases/$(database)/documents/roleRequests/$(userId);
+      return isAdmin() && existsAfter(path) &&
+        getAfter(path).data.get('status', '') == 'approved' &&
+        getAfter(path).data.get('decidedBy', '') == uid() &&
+        getAfter(path).data.get('currentRole', '') ==
+          resource.data.get('role', '') &&
+        getAfter(path).data.get('requestedRole', '') ==
+          request.resource.data.get('role', '');
+    }
+
+    function legacySellerRoleMigration() {
+      return isAdmin() && resource.data.get('role', '') == 'seller' &&
+        request.resource.data.get('role', '') == 'both' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['role']);
     }
 
     function transactionPath(transactionId) {
@@ -301,10 +351,13 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if isSignedIn();
-      // New accounts start on free/active defaults; role 'admin' and
-      // monetization state are never self-granted.
-      allow create: if isAdmin() || (isOwner(userId) &&
-        request.resource.data.get('role', 'customer') in ['customer', 'both'] &&
+      // New accounts start on free/active defaults. Staff roles are never
+      // self-granted, except the fixed demo superadmin identity below.
+      allow create: if (isOwner(userId) &&
+        request.resource.data.get('role', 'customer') in ['customer', 'both'] ||
+        (isOwner(userId) && request.auth.token.email ==
+          'superadmin@swidshop.demo' &&
+          request.resource.data.get('role', '') == 'superadmin')) &&
         request.resource.data.get('plan', 'free') == 'free' &&
         request.resource.data.get('planUntil', null) == null &&
         request.resource.data.get('boostedUntil', null) == null &&
@@ -317,11 +370,24 @@ service cloud.firestore {
         request.resource.data.get('trustedBadge', false) == false &&
         request.resource.data.get('trustedBadgeEligible', false) == false &&
         request.resource.data.get('trustedOpenReports', 0) == 0 &&
-        request.resource.data.get('trustedEligibilityNotified', false) == false);
-      allow update: if isOwner(userId)
-        ? (ownerUserUpdate() || isAdmin())
-        : (isAdmin() || (isSignedIn() && ratingRefresh()));
-      allow delete: if isAdmin();
+        request.resource.data.get('trustedEligibilityNotified', false) == false;
+      allow update: if managedAdminRoleChange(userId) ||
+        approvedRoleRequestChange(userId) || legacySellerRoleMigration() ||
+        (isSuperAdmin() &&
+          request.resource.data.get('role', '') ==
+            resource.data.get('role', '')) ||
+        (isAdmin() &&
+          resource.data.get('role', '') in ['customer', 'both', 'seller'] &&
+          request.resource.data.get('role', '') ==
+            resource.data.get('role', '')) ||
+        (isOwner(userId) &&
+          resource.data.get('role', '') != 'superadmin' &&
+          ownerUserUpdate()) ||
+        (isSignedIn() &&
+          resource.data.get('role', '') in ['customer', 'both', 'seller'] &&
+          ratingRefresh());
+      allow delete: if isSuperAdmin() &&
+        resource.data.get('role', '') != 'superadmin';
 
       // users/{uid}/private/details — phone, street, ID photos, terms,
       // FCM token. Never readable by other users.
@@ -411,6 +477,7 @@ service cloud.firestore {
       let o = resource.data;
       return changedKeys().hasOnly(['currentHighestBid', 'highestBidderId', 'bidCount']) &&
         o.get('status', '') == 'active' && o.get('hidden', false) != true &&
+        o.get('auctionEndAt', null) > request.time &&
         r.get('highestBidderId', '') == uid() &&
         r.currentHighestBid > o.get('currentHighestBid', 0) &&
         r.get('bidCount', 0) == o.get('bidCount', 0) + 1;
@@ -438,21 +505,19 @@ service cloud.firestore {
       allow read: if true;
       // Posting is free but blocked on hold; paid perks start empty
       // (a Photo Pack may be bought before the listing is saved).
-      allow create: if isSignedIn() &&
+      allow create: if isMarketplaceSeller() &&
         request.resource.data.sellerId == uid() &&
-        (isAdmin() || (
-          statusOf(uid()) == 'active' &&
-          request.resource.data.get('featuredUntil', null) == null &&
-          request.resource.data.get('featuredPaymentId', '') == '' &&
-          request.resource.data.get('highlightUntil', null) == null &&
-          request.resource.data.get('bumpedAt', null) == null &&
-          request.resource.data.get('hidden', false) == false &&
-          validPhotoLimit(request.resource.data, listingId) &&
-          request.resource.data.get('images', []).size() <=
-            photoCap(uid(), request.resource.data.get('photoLimit', null)) &&
-          validBuyNowPrice(request.resource.data, uid()) &&
-          validAuctionEnd(request.resource.data, uid())
-        ));
+        statusOf(uid()) == 'active' &&
+        request.resource.data.get('featuredUntil', null) == null &&
+        request.resource.data.get('featuredPaymentId', '') == '' &&
+        request.resource.data.get('highlightUntil', null) == null &&
+        request.resource.data.get('bumpedAt', null) == null &&
+        request.resource.data.get('hidden', false) == false &&
+        validPhotoLimit(request.resource.data, listingId) &&
+        request.resource.data.get('images', []).size() <=
+          photoCap(uid(), request.resource.data.get('photoLimit', null)) &&
+        validBuyNowPrice(request.resource.data, uid()) &&
+        validAuctionEnd(request.resource.data, uid());
       allow update: if isAdmin() ||
         (isOwner(resource.data.sellerId) && ownerListingUpdate(listingId)) ||
         (isSignedIn() && !isOwner(resource.data.sellerId) &&
@@ -464,7 +529,7 @@ service cloud.firestore {
     // bids/{bidId}
     match /bids/{bidId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() &&
+      allow create: if isMarketplaceUser() &&
         request.resource.data.bidderId == uid();
       allow update, delete: if isAdmin();
     }
@@ -476,7 +541,7 @@ service cloud.firestore {
       // seller can query their incoming offers).
       // The offered item is a listing (offeredItemId) or a photo offer
       // (offeredTitle + 1–4 offeredImages, no listing needed).
-      allow create: if isSignedIn() &&
+      allow create: if isMarketplaceUser() &&
         request.resource.data.offeredById == uid() &&
         request.resource.data.sellerId ==
           get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.sellerId &&
@@ -486,7 +551,7 @@ service cloud.firestore {
             request.resource.data.get('offeredTitle', '') != ''));
       // Offerer (withdraw) or the listing's seller (accept / decline).
       // Accepting is blocked while the seller is on hold.
-      allow update: if isAdmin() || (isSignedIn() &&
+      allow update: if isMarketplaceUser() &&
         (resource.data.offeredById == uid() ||
          resource.data.sellerId == uid()) &&
         (request.resource.data.get('status', '') != 'accepted' ||
@@ -537,11 +602,11 @@ service cloud.firestore {
         (resource.data.buyerId == uid() ||
          resource.data.sellerId == uid() ||
          isAdmin());
-      allow create: if isSignedIn() &&
+      allow create: if isMarketplaceUser() &&
         (request.resource.data.buyerId == uid() ||
          request.resource.data.sellerId == uid()) &&
-        (isAdmin() || validNewFee(request.resource.data));
-      allow update: if isAdmin() || (isSignedIn() &&
+        validNewFee(request.resource.data);
+      allow update: if isMarketplaceUser() &&
         (resource.data.buyerId == uid() ||
          resource.data.sellerId == uid()) &&
         same('buyerId', '') && same('sellerId', '') &&
@@ -665,6 +730,39 @@ service cloud.firestore {
     match /partnerAds/{adId} {
       allow read: if true;
       allow create, update, delete: if isAdmin();
+    }
+
+    // The announcement is public content. Only a superadmin may edit it.
+    match /systemSettings/{settingId} {
+      allow read: if settingId == 'public';
+      allow create, update: if isSuperAdmin() &&
+        settingId == 'public' &&
+        request.resource.data.keys().hasOnly([
+          'announcementEnabled', 'announcementMessage', 'updatedAt'
+        ]) &&
+        request.resource.data.get('updatedAt', null) == request.time &&
+        request.resource.data.announcementEnabled is bool &&
+        request.resource.data.announcementMessage is string &&
+        request.resource.data.announcementMessage.size() <= 160;
+      allow delete: if false;
+    }
+
+    // Append-only admin action history; private to superadmins.
+    match /adminAuditLogs/{entryId} {
+      allow read: if isSuperAdmin();
+      allow create: if isAdmin() &&
+        request.resource.data.get('actorUid', '') == uid() &&
+        request.resource.data.get('createdAt', null) == request.time &&
+        request.resource.data.keys().hasOnly([
+          'actorUid', 'action', 'targetType', 'targetId', 'summary',
+          'createdAt'
+        ]) &&
+        request.resource.data.action is string &&
+        request.resource.data.targetType is string &&
+        request.resource.data.targetId is string &&
+        request.resource.data.summary is string &&
+        request.resource.data.summary.size() <= 240;
+      allow update, delete: if false;
     }
   }
 }

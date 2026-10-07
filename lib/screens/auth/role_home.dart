@@ -17,6 +17,7 @@ import 'register_screen.dart';
 Widget homeForRole(UserRole? role) {
   return switch (role) {
     UserRole.admin => const AdminShell(),
+    UserRole.superadmin => const AdminShell(),
     _ => const HomeScreen(),
   };
 }

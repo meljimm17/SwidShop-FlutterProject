@@ -6,6 +6,7 @@ import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../models/listing_model.dart';
 import '../../models/notification_model.dart';
+import '../../models/system_announcement.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/listing_provider.dart';
 import '../../services/firestore_service.dart';
@@ -31,9 +32,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  late final Stream<SystemAnnouncement> _announcementStream;
+
   @override
   void initState() {
     super.initState();
+    _announcementStream = FirestoreService().streamSystemAnnouncement();
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => context.read<ListingProvider>().load(),
     );
@@ -94,6 +98,7 @@ class _HomeScreenState extends State<HomeScreen> {
         body: Column(
           children: [
             if (isGuest) _guestBanner(context),
+            SystemAnnouncementBanner(stream: _announcementStream),
             _greeting(auth),
             _quickAccess(context),
             const SponsoredCarousel(),
@@ -336,6 +341,57 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class SystemAnnouncementBanner extends StatelessWidget {
+  const SystemAnnouncementBanner({super.key, required this.stream});
+
+  final Stream<SystemAnnouncement> stream;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<SystemAnnouncement>(
+      stream: stream,
+      builder: (context, snapshot) {
+        final announcement = snapshot.data;
+        if (announcement == null ||
+            !announcement.enabled ||
+            announcement.message.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: AppColors.teal.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.teal.withValues(alpha: 0.25)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.campaign_outlined,
+                  color: AppColors.teal, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  announcement.message,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

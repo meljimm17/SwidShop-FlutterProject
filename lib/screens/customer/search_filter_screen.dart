@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
+import '../../core/utils.dart';
 import '../../models/category_model.dart';
 import '../../models/listing_model.dart';
 import '../../providers/listing_provider.dart';
@@ -101,9 +103,7 @@ class _SearchFilterScreenState extends State<SearchFilterScreen> {
 
     return Scaffold(
       backgroundColor: AppColors.cream,
-      appBar: TopAppBar(
-        title: widget.sellerName ?? 'Search',
-      ),
+      appBar: TopAppBar(title: widget.sellerName ?? 'Search'),
       body: Column(
         children: [
           Padding(
@@ -184,18 +184,14 @@ class _SearchFilterScreenState extends State<SearchFilterScreen> {
           label: Text(label),
           selected: selected,
           showCheckmark: false,
-          onSelected: (_) => provider.setType(
-            selected ? null : type,
-          ),
+          onSelected: (_) => provider.setType(selected ? null : type),
           selectedColor: AppColors.coral,
           labelStyle: TextStyle(
             color: selected ? Colors.white : AppColors.ink,
             fontWeight: FontWeight.w600,
           ),
           backgroundColor: AppColors.surface,
-          side: BorderSide(
-            color: selected ? AppColors.coral : AppColors.line,
-          ),
+          side: BorderSide(color: selected ? AppColors.coral : AppColors.line),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(999),
           ),
@@ -275,6 +271,7 @@ class _FilterSheet extends StatefulWidget {
 class _FilterSheetState extends State<_FilterSheet> {
   String? _category;
   String? _condition;
+  String? _priceError;
 
   @override
   void initState() {
@@ -370,7 +367,15 @@ class _FilterSheetState extends State<_FilterSheet> {
                 Expanded(
                   child: TextField(
                     controller: widget.minCtrl,
-                    keyboardType: TextInputType.number,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    inputFormatters: [
+                      FilteringTextInputFormatter.allow(
+                        RegExp(r'^\d*\.?\d{0,2}'),
+                      ),
+                    ],
+                    onChanged: (_) => _validatePriceRange(),
                     decoration: const InputDecoration(hintText: 'Min'),
                   ),
                 ),
@@ -378,19 +383,31 @@ class _FilterSheetState extends State<_FilterSheet> {
                 Expanded(
                   child: TextField(
                     controller: widget.maxCtrl,
-                    keyboardType: TextInputType.number,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    inputFormatters: [
+                      FilteringTextInputFormatter.allow(
+                        RegExp(r'^\d*\.?\d{0,2}'),
+                      ),
+                    ],
+                    onChanged: (_) => _validatePriceRange(),
                     decoration: const InputDecoration(hintText: 'Max'),
                   ),
                 ),
               ],
             ),
+            if (_priceError != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                _priceError!,
+                style: const TextStyle(color: AppColors.red, fontSize: 12),
+              ),
+            ],
             const SizedBox(height: 8),
             Text(
               'Applies to fixed prices and current bids.',
-              style: TextStyle(
-                fontSize: 12,
-                color: AppColors.gray,
-              ),
+              style: TextStyle(fontSize: 12, color: AppColors.gray),
             ),
             const SizedBox(height: 20),
             Row(
@@ -408,6 +425,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                 Expanded(
                   child: FilledButton(
                     onPressed: () {
+                      if (!_validatePriceRange()) return;
                       widget.onApply(_category, _condition);
                       Navigator.of(context).pop();
                     },
@@ -423,6 +441,15 @@ class _FilterSheetState extends State<_FilterSheet> {
         ),
       ),
     );
+  }
+
+  bool _validatePriceRange() {
+    final error = Validators.priceRange(
+      widget.minCtrl.text,
+      widget.maxCtrl.text,
+    );
+    if (error != _priceError) setState(() => _priceError = error);
+    return error == null;
   }
 
   Widget _pick(String label, bool selected, VoidCallback onTap) {

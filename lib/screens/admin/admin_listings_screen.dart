@@ -416,9 +416,11 @@ class _ListingMenu extends StatelessWidget {
     if (!ok || !context.mounted) return;
     final a = context.read<AdminProvider>();
     try {
-      await a.firestore.updateListing(listing.listingId, {
-        'status': ListingStatus.removed.value,
-      });
+      await a.firestore.updateListing(
+        listing.listingId,
+        {'status': ListingStatus.removed.value},
+        auditAdminAction: true,
+      );
       await Future.wait(
         a.pendingReports
             .where((r) => r.targetId == listing.listingId)

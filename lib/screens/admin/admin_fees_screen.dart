@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/theme.dart';
 import '../../core/utils.dart';
+import '../../models/payment_model.dart';
 import '../../models/transaction_model.dart';
 import '../../models/user_model.dart';
 import '../../providers/admin_provider.dart';
@@ -24,8 +25,7 @@ void openAdminFees(BuildContext context) {
   );
 }
 
-/// Platform fee ledger (demo): unpaid / paid / overdue tabs + manual
-/// hold/lift per seller. All figures demo-mode.
+/// Payment ledger (simulated): recent payments and outstanding platform fees.
 class AdminFeesScreen extends StatefulWidget {
   const AdminFeesScreen({super.key});
 
@@ -35,7 +35,7 @@ class AdminFeesScreen extends StatefulWidget {
 
 class _AdminFeesScreenState extends State<AdminFeesScreen>
     with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 3, vsync: this);
+  late final TabController _tabs = TabController(length: 4, vsync: this);
 
   @override
   void dispose() {
@@ -45,9 +45,8 @@ class _AdminFeesScreenState extends State<AdminFeesScreen>
 
   @override
   Widget build(BuildContext context) {
-    final txns = context
-        .watch<AdminProvider>()
-        .transactions
+    final admin = context.watch<AdminProvider>();
+    final txns = admin.transactions
         .where((t) => t.feeStatus != 'none')
         .toList();
     final open = txns
@@ -56,6 +55,7 @@ class _AdminFeesScreenState extends State<AdminFeesScreen>
     final unpaid = open.where((t) => !t.feeOverdue).toList();
     final overdue = open.where((t) => t.feeOverdue).toList();
     final paid = txns.where((t) => t.feeStatus == 'paid').toList();
+    final payments = admin.payments;
     return AdminGate(
       child: Scaffold(
         backgroundColor: AppColors.paper,
@@ -63,10 +63,12 @@ class _AdminFeesScreenState extends State<AdminFeesScreen>
           title: 'Fees',
           bottom: TabBar(
             controller: _tabs,
+            isScrollable: true,
             labelColor: AppColors.coralDeep,
             unselectedLabelColor: AppColors.gray,
             indicatorColor: AppColors.coralDeep,
             tabs: [
+              Tab(text: 'Recent Payments (${payments.length})'),
               Tab(text: 'Unpaid (${unpaid.length})'),
               Tab(text: 'Overdue (${overdue.length})'),
               Tab(text: 'Paid (${paid.length})'),
@@ -76,12 +78,130 @@ class _AdminFeesScreenState extends State<AdminFeesScreen>
         body: TabBarView(
           controller: _tabs,
           children: [
+            _PaymentList(payments: payments),
             _FeeList(txns: unpaid, empty: 'No unpaid fees.'),
             _FeeList(txns: overdue, empty: 'Nothing overdue.'),
             _FeeList(txns: paid, empty: 'No paid fees yet.'),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _PaymentList extends StatelessWidget {
+  const _PaymentList({required this.payments});
+
+  final List<PaymentModel> payments;
+
+  @override
+  Widget build(BuildContext context) {
+    final admin = context.watch<AdminProvider>();
+    if (payments.isEmpty) {
+      return Center(
+        child: Text(
+          admin.paymentsError == null
+              ? 'No payments yet.'
+              : 'Payments could not be loaded. Check your connection and '
+                    'try again later.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppColors.gray),
+        ),
+      );
+    }
+    return Column(
+      children: [
+        if (admin.paymentsError != null)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 10, 16, 0),
+            child: Text(
+              'Payment updates are unavailable. The list may be out of date.',
+              style: TextStyle(color: AppColors.red, fontSize: 12),
+            ),
+          ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: payments.length,
+            itemBuilder: (context, index) {
+              final payment = payments[index];
+              final type = RevenueStats.labels[payment.type] ?? payment.type;
+              final label = payment.label.isEmpty ? type : payment.label;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: AdminCard(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const CircleAvatar(
+                        radius: 19,
+                        backgroundColor: AppColors.mist,
+                        child: Icon(
+                          Icons.receipt_long_outlined,
+                          size: 19,
+                          color: AppColors.teal,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '${admin.nameOf(payment.userId)} · $type',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: AppColors.gray,
+                              ),
+                            ),
+                            if (payment.referenceNo.isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                'Ref ${payment.referenceNo}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.gray,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 3),
+                            Text(
+                              AppUtils.formatDateTime(payment.createdAt),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: AppColors.gray,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        AppUtils.formatCurrency(payment.amount),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.ink,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
@@ -111,10 +231,7 @@ class _FeeList extends StatelessWidget {
         final entry = bySeller.entries.elementAt(i);
         return Padding(
           padding: const EdgeInsets.only(bottom: 12),
-          child: _SellerFeeCard(
-            sellerId: entry.key,
-            txns: entry.value,
-          ),
+          child: _SellerFeeCard(sellerId: entry.key, txns: entry.value),
         );
       },
     );
@@ -145,10 +262,10 @@ class _SellerFeeCardState extends State<_SellerFeeCard> {
         content: Text(
           hold
               ? 'Their listings are hidden and they cannot post or accept '
-                  'swaps. They can still log in, chat and pay. A manual hold '
-                  'stays until an admin lifts it, even after paying.'
+                    'swaps. They can still log in, chat and pay. A manual hold '
+                    'stays until an admin lifts it, even after paying.'
               : 'Their listings become visible again. If they still have '
-                  'overdue fees, the automatic hold returns at the next check.',
+                    'overdue fees, the automatic hold returns at the next check.',
         ),
         actions: [
           TextButton(
@@ -193,8 +310,12 @@ class _SellerFeeCardState extends State<_SellerFeeCard> {
     }
     final onHold = seller?.accountStatus == AccountStatus.onHold;
     // A fee hold must never replace a suspension or ban.
-    final blocked = seller?.accountStatus == AccountStatus.suspended ||
+    final blocked =
+        seller?.accountStatus == AccountStatus.suspended ||
         seller?.accountStatus == AccountStatus.banned;
+    final hasOutstandingFee = widget.txns.any(
+      (t) => t.feeUnpaid && t.status != TransactionStatus.cancelled,
+    );
     return AdminCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -229,9 +350,7 @@ class _SellerFeeCardState extends State<_SellerFeeCard> {
                 children: [
                   Expanded(
                     child: Text(
-                      t.listingTitle.isEmpty
-                          ? t.orderNumber
-                          : t.listingTitle,
+                      t.listingTitle.isEmpty ? t.orderNumber : t.listingTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 13),
@@ -239,10 +358,7 @@ class _SellerFeeCardState extends State<_SellerFeeCard> {
                   ),
                   Text(
                     '${AppUtils.formatCurrency(t.feeAmount)} · ${t.feeStatus}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.gray,
-                    ),
+                    style: const TextStyle(fontSize: 12, color: AppColors.gray),
                   ),
                 ],
               ),
@@ -256,13 +372,13 @@ class _SellerFeeCardState extends State<_SellerFeeCard> {
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
               ),
-              TextButton(
-                onPressed:
-                    _busy || blocked || seller == null
-                        ? null
-                        : () => _hold(!onHold),
-                child: Text(onHold ? 'Lift hold' : 'Hold account'),
-              ),
+              if (onHold || (hasOutstandingFee && !blocked))
+                TextButton(
+                  onPressed: _busy || blocked || seller == null
+                      ? null
+                      : () => _hold(!onHold),
+                  child: Text(onHold ? 'Lift hold' : 'Hold account'),
+                ),
             ],
           ),
         ],

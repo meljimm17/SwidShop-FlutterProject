@@ -235,12 +235,9 @@ class AdminDashboardScreen extends StatelessWidget {
           _StatCard(
             label: 'Pending Reports',
             icon: Icons.outlined_flag,
-            iconColor: a.pendingQueueCount > 0
-                ? AppColors.red
-                : AppColors.teal,
+            iconColor: a.pendingQueueCount > 0 ? AppColors.red : AppColors.teal,
             value: '${a.pendingQueueCount}',
-            valueColor:
-                a.pendingQueueCount > 0 ? AppColors.red : AppColors.ink,
+            valueColor: a.pendingQueueCount > 0 ? AppColors.red : AppColors.ink,
             onTap: () => AdminShell.goTo(context, AdminSection.reports),
             footer: Text(
               a.pendingQueueCount == 0
@@ -490,16 +487,13 @@ class _RevenueCard extends StatelessWidget {
     final plans = RevenueStats.paidPlans(admin.users);
     final boosted = RevenueStats.activeBoosts(admin.users);
     final weekly = RevenueStats.weekly(payments);
-    final recent = payments.take(5).toList();
 
     return _ChartCard(
       title: 'Revenue',
       subtitle: 'Fees, plans, boosts, featured, photo packs & ads',
       trailing: TextButton(
         onPressed: () => openAdminFees(context),
-        style: TextButton.styleFrom(
-          foregroundColor: AppColors.coralDeep,
-        ),
+        style: TextButton.styleFrom(foregroundColor: AppColors.coralDeep),
         child: const Text('Fees ›'),
       ),
       child: Column(
@@ -507,10 +501,7 @@ class _RevenueCard extends StatelessWidget {
         children: [
           Text(
             AppUtils.formatCurrency(total),
-            style: const TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.w800,
-            ),
+            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
           ),
           const Text(
             'Total revenue',
@@ -533,42 +524,6 @@ class _RevenueCard extends StatelessWidget {
             _kv('  of which overdue', AppUtils.formatCurrency(fees.overdue)),
           _kv('Active boosts', '$boosted shop${boosted == 1 ? '' : 's'}'),
           _kv('Active Plus / Pro sellers', '${plans.plus} / ${plans.pro}'),
-          const SizedBox(height: 10),
-          const Text(
-            'Recent payments',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-          ),
-          const SizedBox(height: 4),
-          if (recent.isEmpty)
-            const Text(
-              'No payments yet.',
-              style: TextStyle(fontSize: 12.5, color: AppColors.gray),
-            ),
-          for (final p in recent)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '${admin.nameOf(p.userId)} · '
-                      '${p.label.isEmpty ? (RevenueStats.labels[p.type] ?? p.type) : p.label}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12.5),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    AppUtils.formatCurrency(p.amount),
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
         ],
       ),
     );
@@ -591,9 +546,7 @@ class _RevenueCard extends StatelessWidget {
                 value: frac,
                 minHeight: 8,
                 backgroundColor: AppColors.line,
-                valueColor: const AlwaysStoppedAnimation<Color>(
-                  AppColors.teal,
-                ),
+                valueColor: const AlwaysStoppedAnimation<Color>(AppColors.teal),
               ),
             ),
           ),
@@ -605,10 +558,7 @@ class _RevenueCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.right,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-              ),
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
             ),
           ),
         ],
@@ -624,16 +574,12 @@ class _RevenueCard extends StatelessWidget {
           Expanded(
             child: Text(
               k,
-              style:
-                  const TextStyle(fontSize: 12.5, color: AppColors.gray),
+              style: const TextStyle(fontSize: 12.5, color: AppColors.gray),
             ),
           ),
           Text(
             v,
-            style: const TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-            ),
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
           ),
         ],
       ),

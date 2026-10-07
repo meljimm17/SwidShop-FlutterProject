@@ -32,10 +32,12 @@ class LiveBiddingScreen extends StatefulWidget {
 class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
   final _firestore = FirestoreService();
   final _bidCtrl = TextEditingController();
-  late final Stream<ListingModel?> _listing =
-      _firestore.streamListing(widget.listingId);
-  late final Stream<List<BidModel>> _bids =
-      _firestore.streamBids(widget.listingId);
+  late final Stream<ListingModel?> _listing = _firestore.streamListing(
+    widget.listingId,
+  );
+  late final Stream<List<BidModel>> _bids = _firestore.streamBids(
+    widget.listingId,
+  );
 
   Timer? _ticker;
   bool _bidding = false;
@@ -92,17 +94,16 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
       );
       _bidCtrl.clear();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Bid placed — you lead!')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Bid placed — you lead!')));
       // Notify the outbid party + the seller (fire-and-forget).
       // ignore: unawaited_futures
       _notifyOutbid(l, previousLead: previousLead, winnerId: uid);
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _inputError =
-            e is StateError ? e.message : 'Bid failed. Try again.';
+        _inputError = e is StateError ? e.message : 'Bid failed. Try again.';
       });
     } finally {
       if (mounted) setState(() => _bidding = false);
@@ -114,9 +115,7 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
     required String previousLead,
     required String winnerId,
   }) async {
-    final price = AppUtils.formatCurrency(
-      l.currentHighestBid ?? l.startingBid,
-    );
+    final price = AppUtils.formatCurrency(l.currentHighestBid ?? l.startingBid);
     if (previousLead.isNotEmpty && previousLead != winnerId) {
       try {
         await _firestore.addNotification(
@@ -187,7 +186,10 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
             return const Center(child: Text('Listing not found'));
           }
           _maybeClose(listing);
-          final closed = listing.status != ListingStatus.active;
+          final endedByTime =
+              listing.auctionEndAt != null &&
+              !listing.auctionEndAt!.isAfter(DateTime.now());
+          final closed = listing.status != ListingStatus.active || endedByTime;
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
@@ -244,9 +246,7 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            AppUtils.formatCurrency(
-              l.currentHighestBid ?? l.startingBid,
-            ),
+            AppUtils.formatCurrency(l.currentHighestBid ?? l.startingBid),
             style: const TextStyle(
               color: AppColors.amber,
               fontSize: 36,
@@ -274,8 +274,8 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
           color: ended
               ? AppColors.gray
               : (AppUtils.isEndingSoon(l.auctionEndAt)
-                  ? AppColors.amber
-                  : AppColors.ink),
+                    ? AppColors.amber
+                    : AppColors.ink),
         ),
         const SizedBox(width: 6),
         Text(
@@ -303,8 +303,9 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
                   selected: false,
                   showCheckmark: false,
                   onSelected: (_) {
-                    _bidCtrl.text =
-                        (minimum + step * (i - 1)).toStringAsFixed(0);
+                    _bidCtrl.text = (minimum + step * (i - 1)).toStringAsFixed(
+                      0,
+                    );
                     setState(() => _inputError = null);
                   },
                 ),
@@ -316,8 +317,7 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
           controller: _bidCtrl,
           keyboardType: TextInputType.number,
           decoration: InputDecoration(
-            labelText:
-                'Your bid (min ${AppUtils.formatCurrency(minimum)})',
+            labelText: 'Your bid (min ${AppUtils.formatCurrency(minimum)})',
             prefixIcon: const Icon(Icons.gavel_outlined),
             errorText: _inputError,
           ),
@@ -370,14 +370,13 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
                         else
                           const SizedBox(width: 18),
                         const SizedBox(width: 8),
-                        Expanded(
-                          child: UserNameText(bids[i].bidderId),
-                        ),
+                        Expanded(child: UserNameText(bids[i].bidderId)),
                         Text(
                           AppUtils.formatCurrency(bids[i].amount),
                           style: TextStyle(
-                            fontWeight:
-                                i == 0 ? FontWeight.w800 : FontWeight.w500,
+                            fontWeight: i == 0
+                                ? FontWeight.w800
+                                : FontWeight.w500,
                           ),
                         ),
                       ],
@@ -391,17 +390,23 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
     );
   }
 
-  Widget _closedState(
-    BuildContext context,
-    ListingModel l,
-    String uid,
-  ) {
-    final won = l.highestBidderId.isNotEmpty && l.highestBidderId == uid;
+  Widget _closedState(BuildContext context, ListingModel l, String uid) {
+    final finalizing = l.status == ListingStatus.active;
+    final won =
+        !finalizing && l.highestBidderId.isNotEmpty && l.highestBidderId == uid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_closing)
           const Center(child: CircularProgressIndicator())
+        else if (finalizing)
+          const Center(
+            child: Text(
+              'This auction has ended. The final result is being processed.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.gray),
+            ),
+          )
         else if (won) ...[
           const Center(
             child: Text(
@@ -422,8 +427,7 @@ class _LiveBiddingScreenState extends State<LiveBiddingScreen> {
               id ??= (await _firestore.findSellerTransactionForListing(
                 sellerId: l.sellerId,
                 listingId: l.listingId,
-              ))
-                  ?.transactionId;
+              ))?.transactionId;
               if (!context.mounted) return;
               if (id == null) {
                 ScaffoldMessenger.of(context).showSnackBar(

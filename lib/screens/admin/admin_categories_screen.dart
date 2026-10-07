@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -198,14 +199,20 @@ class _AdminCategoriesScreenState extends State<AdminCategoriesScreen> {
           -1,
           (m, c) => c.sortOrder > m ? c.sortOrder : m,
         );
-        await fs.seedCategories([
+        final auditSaved = await fs.createCategory(
           CategoryModel(
             categoryId: '',
             name: name,
             iconName: icon,
             sortOrder: next + 1,
           ),
-        ]);
+        );
+        if (!auditSaved && mounted) {
+          showAdminError(
+            context,
+            'Category added, but its audit record could not be saved.',
+          );
+        }
       } else {
         await fs.updateCategory(existing.categoryId, {
           'name': name,
@@ -218,7 +225,18 @@ class _AdminCategoriesScreenState extends State<AdminCategoriesScreen> {
       }
     } catch (e) {
       debugPrint('saveCategory: $e');
-      if (mounted) showAdminError(context, 'Could not save. Try again.');
+      if (mounted) {
+        final message = switch (e) {
+          FirebaseException(code: 'permission-denied') =>
+            'You do not have permission to add categories.',
+          FirebaseException(code: 'unavailable') =>
+            'Could not connect. Check your internet and try again.',
+          StateError(:final message) => message.toString(),
+          FirebaseException(:final message) when message != null => message,
+          _ => 'Could not save category. Try again.',
+        };
+        showAdminError(context, message);
+      }
     }
   }
 
@@ -227,7 +245,9 @@ class _AdminCategoriesScreenState extends State<AdminCategoriesScreen> {
     final affected = a.listings.where((l) => l.category == from);
     await Future.wait(
       affected.map(
-        (l) => a.firestore.updateListing(l.listingId, {'category': to}),
+        (l) => a.firestore.updateListing(l.listingId, {
+          'category': to,
+        }, auditAdminAction: true),
       ),
     );
   }

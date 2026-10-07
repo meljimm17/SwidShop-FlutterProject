@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/constants.dart';
 import '../core/utils.dart';
 import '../models/bid_model.dart';
 import '../models/category_model.dart';
+import '../models/admin_audit_entry.dart';
 import '../models/chat_message_model.dart';
 import '../models/listing_model.dart';
 import '../models/notification_model.dart';
@@ -19,6 +21,7 @@ import '../models/user_model.dart';
 import '../models/partner_ad_model.dart';
 import '../models/role_request_model.dart';
 import '../models/payment_model.dart';
+import '../models/system_announcement.dart';
 import '../models/user_private_details_model.dart';
 
 /// Thin, typed data-access layer over Cloud Firestore.
@@ -30,7 +33,7 @@ import '../models/user_private_details_model.dart';
 /// without deploying composite indexes (see AGENTS.md).
 class FirestoreService {
   FirestoreService({FirebaseFirestore? firestore})
-      : _db = firestore ?? FirebaseFirestore.instance;
+    : _db = firestore ?? FirebaseFirestore.instance;
 
   final FirebaseFirestore _db;
 
@@ -50,13 +53,164 @@ class FirestoreService {
       _db.collection(AppConstants.reportsCollection);
   CollectionReference<Map<String, dynamic>> get _categories =>
       _db.collection(AppConstants.categoriesCollection);
+  CollectionReference<Map<String, dynamic>> get _auditLogs =>
+      _db.collection(AppConstants.adminAuditLogsCollection);
+
+  void _stageAdminAudit(
+    WriteBatch batch, {
+    required String action,
+    required String targetType,
+    required String targetId,
+    required String summary,
+  }) {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid;
+    if (actorUid == null) throw StateError('An admin session is required.');
+    final ref = _auditLogs.doc();
+    batch.set(ref, {
+      'actorUid': actorUid,
+      'action': action,
+      'targetType': targetType,
+      'targetId': targetId,
+      'summary': summary,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Audit trail is visible only to superadmins and is append-only.
+  Stream<List<AdminAuditEntry>> streamAdminAuditLogs() =>
+      _auditLogs.snapshots().map((snap) {
+        final entries = snap.docs
+            .map((d) => AdminAuditEntry.fromMap(d.id, d.data()))
+            .toList();
+        entries.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        return entries;
+      });
+
+  /// Current customer-facing announcement, configured by superadmins.
+  Stream<SystemAnnouncement> streamSystemAnnouncement() => _db
+      .collection(AppConstants.systemSettingsCollection)
+      .doc(AppConstants.publicSystemSettingsDoc)
+      .snapshots()
+      .map((snap) => SystemAnnouncement.fromMap(snap.data()));
+
+  /// Assign or revoke an admin role while preserving the user's customer
+  /// role for a later restore. A superadmin cannot change their own role or
+  /// modify another superadmin through this screen.
+  Future<void> setManagedAdminRole(
+    String uid, {
+    required bool makeAdmin,
+  }) async {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid;
+    if (actorUid == null || actorUid == uid) {
+      throw StateError('Choose another account to manage.');
+    }
+    final userRef = _users.doc(uid);
+    final auditRef = _auditLogs.doc();
+    await _db.runTransaction((transaction) async {
+      final snapshot = await transaction.get(userRef);
+      final data = snapshot.data();
+      if (data == null) throw StateError('That account no longer exists.');
+      final role = UserRole.fromValue(data['role'] as String?);
+      if (role == UserRole.superadmin) {
+        throw StateError('Superadmin accounts cannot be changed here.');
+      }
+      if (makeAdmin) {
+        if (role == UserRole.admin) return;
+        transaction.update(userRef, {
+          'roleBeforeAdmin': data['role'] as String? ?? role.value,
+          'role': UserRole.admin.value,
+        });
+      } else {
+        if (role != UserRole.admin) return;
+        final prior = data['roleBeforeAdmin'] as String?;
+        final restore =
+            prior == UserRole.both.value || prior == UserRole.legacySellerValue
+            ? UserRole.both
+            : UserRole.customer;
+        transaction.update(userRef, {
+          'role': restore.value,
+          'roleBeforeAdmin': FieldValue.delete(),
+        });
+      }
+      transaction.set(auditRef, {
+        'actorUid': actorUid,
+        'action': makeAdmin ? 'admin_granted' : 'admin_revoked',
+        'targetType': 'user',
+        'targetId': uid,
+        'summary': makeAdmin
+            ? 'Granted admin access to account $uid.'
+            : 'Revoked admin access from account $uid.',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  /// Stores a short, public announcement; never use this for secrets or
+  /// private operational settings.
+  Future<void> saveSystemAnnouncement({
+    required bool enabled,
+    required String message,
+  }) async {
+    final normalized = message.trim();
+    if (normalized.length > 160) {
+      throw ArgumentError('Announcement must be 160 characters or fewer.');
+    }
+    if (enabled && normalized.isEmpty) {
+      throw ArgumentError('Enter an announcement before showing it.');
+    }
+    final batch = _db.batch();
+    batch.set(
+      _db
+          .collection(AppConstants.systemSettingsCollection)
+          .doc(AppConstants.publicSystemSettingsDoc),
+      {
+        'announcementEnabled': enabled,
+        'announcementMessage': normalized,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+    _stageAdminAudit(
+      batch,
+      action: 'system_announcement_updated',
+      targetType: 'system_settings',
+      targetId: AppConstants.publicSystemSettingsDoc,
+      summary: enabled
+          ? 'Published a customer announcement.'
+          : 'Turned off the customer announcement.',
+    );
+    await batch.commit();
+  }
 
   // ---------------------------------------------------------------------------
   // users
   // ---------------------------------------------------------------------------
 
   Future<void> createUserProfile(UserModel user) =>
-      _users.doc(user.uid).set(user.toMap());
+      _createUserProfileWithStaffNotice(user);
+
+  Future<void> _createUserProfileWithStaffNotice(UserModel user) async {
+    final profileRef = _users.doc(user.uid);
+    final existingProfile = await profileRef.get();
+    final batch = _db.batch()..set(profileRef, user.toMap());
+    final wasComplete = existingProfile.exists
+        ? UserModel.fromMap(
+            user.uid,
+            existingProfile.data() ?? {},
+          ).profileComplete
+        : false;
+    if (!wasComplete && user.profileComplete && user.role.canUseMarketplace) {
+      final staff = await _staffUsers();
+      _stageStaffNotification(
+        batch,
+        staff,
+        message:
+            'New account registered: ${user.name.isEmpty ? user.email : user.name}.',
+        relatedId: 'user:${user.uid}',
+      );
+    }
+    await batch.commit();
+  }
 
   Future<void> updateUserProfile(String uid, Map<String, dynamic> data) =>
       _users.doc(uid).update(data);
@@ -86,11 +240,10 @@ class FirestoreService {
         return data == null ? null : UserModel.fromMap(snap.id, data);
       });
 
-  DocumentReference<Map<String, dynamic>> _privateDetails(String uid) =>
-      _users
-          .doc(uid)
-          .collection(AppConstants.userPrivateSubcollection)
-          .doc(AppConstants.userPrivateDetailsDoc);
+  DocumentReference<Map<String, dynamic>> _privateDetails(String uid) => _users
+      .doc(uid)
+      .collection(AppConstants.userPrivateSubcollection)
+      .doc(AppConstants.userPrivateDetailsDoc);
 
   /// Owner/admin-only details (phone, street, ID photos, terms acceptance).
   Future<void> saveUserPrivateDetails(String uid, UserPrivateDetails details) =>
@@ -98,8 +251,8 @@ class FirestoreService {
 
   /// Device token for fee-reminder pushes (read by the `feeReminders`
   /// function). Private: never on the public user doc.
-  Future<void> saveFcmToken(String uid, String token) =>
-      _privateDetails(uid).set({
+  Future<void> saveFcmToken(String uid, String token) => _privateDetails(uid)
+      .set({
         'fcmToken': token,
         'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
@@ -120,9 +273,50 @@ class FirestoreService {
 
   /// Posting is always free, but blocked while the seller is on fee hold
   /// (or suspended/banned).
+  static String? listingInputProblem(ListingModel listing, {DateTime? now}) {
+    if (listing.title.trim().isEmpty) {
+      return 'Add a title before posting this listing.';
+    }
+    if (listing.images.isEmpty ||
+        listing.images.any((image) => image.trim().isEmpty)) {
+      return 'Add at least one valid photo before posting.';
+    }
+    bool positiveFinite(double? value) =>
+        value != null && value.isFinite && value > 0;
+    switch (listing.type) {
+      case ListingType.buyNow:
+        if (!positiveFinite(listing.price)) {
+          return 'Enter a valid price greater than zero.';
+        }
+      case ListingType.bid:
+        if (!positiveFinite(listing.startingBid)) {
+          return 'Enter a valid starting bid greater than zero.';
+        }
+        if (!positiveFinite(listing.minIncrement)) {
+          return 'Enter a valid bid increment greater than zero.';
+        }
+        if (listing.auctionEndAt == null ||
+            !listing.auctionEndAt!.isAfter(now ?? DateTime.now())) {
+          return 'Choose an auction end time in the future.';
+        }
+      case ListingType.swap:
+        if (!listing.swapOnly && !positiveFinite(listing.price)) {
+          return 'Enter a valid cash price greater than zero.';
+        }
+    }
+    return null;
+  }
+
   Future<String> createListing(ListingModel listing) async {
+    final inputProblem = listingInputProblem(listing);
+    if (inputProblem != null) {
+      throw StateError(inputProblem);
+    }
     final seller = await getUser(listing.sellerId);
-    if (seller != null && seller.accountStatus != AccountStatus.active) {
+    if (seller == null || !seller.role.canSell) {
+      throw StateError('Only Customer + Seller accounts can post listings.');
+    }
+    if (seller.accountStatus != AccountStatus.active) {
       throw StateError(
         seller.accountStatus == AccountStatus.onHold
             ? 'Your shop is on hold over unpaid fees — pay them to post again.'
@@ -134,15 +328,51 @@ class FirestoreService {
         : _listings.doc(listing.listingId);
     final data = listing.copyWith(listingId: ref.id).toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
-    await ref.set(data);
+    final batch = _db.batch()..set(ref, data);
+    if (listing.status == ListingStatus.active) {
+      final staff = await _staffUsers();
+      _stageStaffNotification(
+        batch,
+        staff,
+        message: 'New active listing: ${listing.title}.',
+        relatedId: 'listing:${ref.id}',
+      );
+    }
+    await batch.commit();
     return ref.id;
   }
 
-  Future<void> updateListing(String listingId, Map<String, dynamic> data) =>
-      _listings.doc(listingId).update(data);
+  Future<void> updateListing(
+    String listingId,
+    Map<String, dynamic> data, {
+    bool auditAdminAction = false,
+  }) async {
+    if (!auditAdminAction) {
+      await _listings.doc(listingId).update(data);
+      return;
+    }
+    final batch = _db.batch()..update(_listings.doc(listingId), data);
+    _stageAdminAudit(
+      batch,
+      action: 'listing_updated',
+      targetType: 'listing',
+      targetId: listingId,
+      summary: 'Updated listing fields: ${data.keys.join(', ')}.',
+    );
+    await batch.commit();
+  }
 
-  Future<void> deleteListing(String listingId) =>
-      _listings.doc(listingId).delete();
+  Future<void> deleteListing(String listingId) async {
+    final batch = _db.batch()..delete(_listings.doc(listingId));
+    _stageAdminAudit(
+      batch,
+      action: 'listing_deleted',
+      targetType: 'listing',
+      targetId: listingId,
+      summary: 'Deleted a listing.',
+    );
+    await batch.commit();
+  }
 
   Future<ListingModel?> getListing(String listingId) async {
     final snap = await _listings.doc(listingId).get();
@@ -171,8 +401,10 @@ class FirestoreService {
     String? category,
     int limit = 200,
   }) {
-    Query<Map<String, dynamic>> query =
-        _listings.where('status', isEqualTo: ListingStatus.active.value);
+    Query<Map<String, dynamic>> query = _listings.where(
+      'status',
+      isEqualTo: ListingStatus.active.value,
+    );
     if (category != null && category.isNotEmpty) {
       query = query.where('category', isEqualTo: category);
     }
@@ -187,12 +419,11 @@ class FirestoreService {
   }
 
   /// All of a seller's listings (every status), newest first.
-  Stream<List<ListingModel>> streamSellerListings(String sellerId) => _listings
-          .where('sellerId', isEqualTo: sellerId)
-          .snapshots()
-          .map((snap) {
-        final items =
-            snap.docs.map((d) => ListingModel.fromMap(d.id, d.data())).toList();
+  Stream<List<ListingModel>> streamSellerListings(String sellerId) =>
+      _listings.where('sellerId', isEqualTo: sellerId).snapshots().map((snap) {
+        final items = snap.docs
+            .map((d) => ListingModel.fromMap(d.id, d.data()))
+            .toList();
         items.sort((a, b) => _newestFirst(a.createdAt, b.createdAt));
         return items;
       });
@@ -207,6 +438,7 @@ class FirestoreService {
     required String bidderId,
     required double amount,
   }) async {
+    await _requireMarketplaceAccount(bidderId, action: 'place bids');
     final bidRef = _bids.doc();
     final listingRef = _listings.doc(listingId);
 
@@ -216,7 +448,8 @@ class FirestoreService {
       if (data == null) {
         throw StateError('Listing no longer exists.');
       }
-      final current = (data['currentHighestBid'] as num?)?.toDouble() ??
+      final current =
+          (data['currentHighestBid'] as num?)?.toDouble() ??
           (data['startingBid'] as num?)?.toDouble() ??
           0;
       if ((data['sellerId'] as String? ?? '') == bidderId) {
@@ -225,15 +458,17 @@ class FirestoreService {
       if (data['status'] != ListingStatus.active.value) {
         throw StateError('This auction has ended.');
       }
+      final auctionEnd = (data['auctionEndAt'] as Timestamp?)?.toDate();
+      if (auctionEnd != null && !auctionEnd.isAfter(DateTime.now())) {
+        throw StateError('This auction has ended.');
+      }
       if (data['hidden'] == true) {
         throw StateError('This item is temporarily unavailable.');
       }
       final step = (data['minIncrement'] as num?)?.toDouble() ?? 1;
       final minimum = current + (step <= 0 ? 1 : step);
       if (amount < minimum) {
-        throw StateError(
-          'Bid must be at least ${minimum.toStringAsFixed(0)}.',
-        );
+        throw StateError('Bid must be at least ${minimum.toStringAsFixed(0)}.');
       }
       tx.set(bidRef, {
         'bidId': bidRef.id,
@@ -254,12 +489,11 @@ class FirestoreService {
 
   /// Bids on a listing, highest amount first (re-sort by `placedAt` for a
   /// chronological log).
-  Stream<List<BidModel>> streamBids(String listingId) => _bids
-          .where('listingId', isEqualTo: listingId)
-          .snapshots()
-          .map((snap) {
-        final bids =
-            snap.docs.map((d) => BidModel.fromMap(d.id, d.data())).toList();
+  Stream<List<BidModel>> streamBids(String listingId) =>
+      _bids.where('listingId', isEqualTo: listingId).snapshots().map((snap) {
+        final bids = snap.docs
+            .map((d) => BidModel.fromMap(d.id, d.data()))
+            .toList();
         bids.sort((a, b) => b.amount.compareTo(a.amount));
         return bids;
       });
@@ -334,7 +568,8 @@ class FirestoreService {
             uid,
             NotificationModel(
               type: NotificationType.system,
-              message: 'The seller changed the end time of "$title" — it '
+              message:
+                  'The seller changed the end time of "$title" — it '
                   'now ends ${AppUtils.formatDateTime(newEnd)}.',
               relatedId: 'listing:$listingId',
             ),
@@ -369,78 +604,81 @@ class FirestoreService {
     final preListing = await getListing(listingId);
     final feeRate = await _sellerFeeRate(preListing?.sellerId ?? '');
 
-    return _db.runTransaction<String?>((tx) async {
-      final snap = await tx.get(listingRef);
-      final data = snap.data();
-      if (data == null) return null;
-      final listing = ListingModel.fromMap(snap.id, data);
-      if (listing.status != ListingStatus.active) return null;
-      final end = listing.auctionEndAt;
-      if (end == null || end.isAfter(DateTime.now())) return null;
+    return _db
+        .runTransaction<String?>((tx) async {
+          final snap = await tx.get(listingRef);
+          final data = snap.data();
+          if (data == null) return null;
+          final listing = ListingModel.fromMap(snap.id, data);
+          if (listing.status != ListingStatus.active) return null;
+          final end = listing.auctionEndAt;
+          if (end == null || end.isAfter(DateTime.now())) return null;
 
-      // No bids, or the hidden reserve wasn't met → ends unsold.
-      final reserve = listing.reservePrice;
-      if (top == null || (reserve != null && top.amount < reserve)) {
-        tx.update(listingRef, {'status': ListingStatus.expired.value});
-        return null;
-      }
-      tx.update(listingRef, {
-        'status': ListingStatus.sold.value,
-        'currentHighestBid': top.amount,
-      });
-      final txn = TransactionModel(
-        transactionId: txnRef.id,
-        listingId: listingId,
-        buyerId: top.bidderId,
-        sellerId: listing.sellerId,
-        type: ListingType.bid,
-        amount: top.amount,
-        listingTitle: listing.title,
-        listingImage: listing.images.isNotEmpty ? listing.images.first : '',
-        feeRate: feeRate,
-        feeAmount: Fees.amountFor(top.amount, feeRate),
-        feeStatus: 'unpaid',
-        feeDueAt: Fees.dueFrom(DateTime.now()),
-      ).toMap();
-      txn['createdAt'] = FieldValue.serverTimestamp();
-      tx.set(txnRef, txn);
-      return txnRef.id;
-    }).then((txnId) async {
-      // Outside the transaction: tell winner and seller (fire-and-forget
-      // each so a notification write can never fail the close itself).
-      final winner = top;
-      if (txnId == null || winner == null) return txnId;
-      final closed = await getListing(listingId);
-      final title = closed?.title ?? 'your auction';
-      final sellerId = closed?.sellerId ?? '';
-      try {
-        await addNotification(
-          winner.bidderId,
-          NotificationModel(
-            type: NotificationType.transactionUpdate,
-            message: 'You won "$title"! Open the chat to arrange handover.',
-            relatedId: 'transaction:$txnId',
-          ),
-        );
-      } catch (e) {
-        debugPrint('notifyAuctionWinner: $e');
-      }
-      try {
-        if (sellerId.isNotEmpty) {
-          await addNotification(
-            sellerId,
-            NotificationModel(
-              type: NotificationType.transactionUpdate,
-              message: '"$title" sold at auction. Open the chat to arrange handover.',
-              relatedId: 'transaction:$txnId',
-            ),
-          );
-        }
-      } catch (e) {
-        debugPrint('notifyAuctionSeller: $e');
-      }
-      return txnId;
-    });
+          // No bids, or the hidden reserve wasn't met → ends unsold.
+          final reserve = listing.reservePrice;
+          if (top == null || (reserve != null && top.amount < reserve)) {
+            tx.update(listingRef, {'status': ListingStatus.expired.value});
+            return null;
+          }
+          tx.update(listingRef, {
+            'status': ListingStatus.sold.value,
+            'currentHighestBid': top.amount,
+          });
+          final txn = TransactionModel(
+            transactionId: txnRef.id,
+            listingId: listingId,
+            buyerId: top.bidderId,
+            sellerId: listing.sellerId,
+            type: ListingType.bid,
+            amount: top.amount,
+            listingTitle: listing.title,
+            listingImage: listing.images.isNotEmpty ? listing.images.first : '',
+            feeRate: feeRate,
+            feeAmount: Fees.amountFor(top.amount, feeRate),
+            feeStatus: 'unpaid',
+            feeDueAt: Fees.dueFrom(DateTime.now()),
+          ).toMap();
+          txn['createdAt'] = FieldValue.serverTimestamp();
+          tx.set(txnRef, txn);
+          return txnRef.id;
+        })
+        .then((txnId) async {
+          // Outside the transaction: tell winner and seller (fire-and-forget
+          // each so a notification write can never fail the close itself).
+          final winner = top;
+          if (txnId == null || winner == null) return txnId;
+          final closed = await getListing(listingId);
+          final title = closed?.title ?? 'your auction';
+          final sellerId = closed?.sellerId ?? '';
+          try {
+            await addNotification(
+              winner.bidderId,
+              NotificationModel(
+                type: NotificationType.transactionUpdate,
+                message: 'You won "$title"! Open the chat to arrange handover.',
+                relatedId: 'transaction:$txnId',
+              ),
+            );
+          } catch (e) {
+            debugPrint('notifyAuctionWinner: $e');
+          }
+          try {
+            if (sellerId.isNotEmpty) {
+              await addNotification(
+                sellerId,
+                NotificationModel(
+                  type: NotificationType.transactionUpdate,
+                  message:
+                      '"$title" sold at auction. Open the chat to arrange handover.',
+                  relatedId: 'transaction:$txnId',
+                ),
+              );
+            }
+          } catch (e) {
+            debugPrint('notifyAuctionSeller: $e');
+          }
+          return txnId;
+        });
   }
 
   /// Closes every expired bid listing while the app is open.
@@ -484,6 +722,10 @@ class FirestoreService {
   /// (rules require it to match the listing owner). The offered item is a
   /// listing OR a photo offer (title + 1–4 photos).
   Future<String> createSwapOffer(SwapOfferModel offer) async {
+    await _requireMarketplaceAccount(
+      offer.offeredById,
+      action: 'make swap offers',
+    );
     final ref = offer.offerId.isEmpty
         ? _swapOffers.doc()
         : _swapOffers.doc(offer.offerId);
@@ -509,8 +751,7 @@ class FirestoreService {
     if (sellerId.isNotEmpty && sellerId == offer.offeredById) {
       throw StateError('You cannot swap with your own listing.');
     }
-    final data =
-        offer.copyWith(offerId: ref.id, sellerId: sellerId).toMap();
+    final data = offer.copyWith(offerId: ref.id, sellerId: sellerId).toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
     await ref.set(data);
     return ref.id;
@@ -558,9 +799,9 @@ class FirestoreService {
 
   /// Every request, pending first then newest (admin; client sort).
   Stream<List<RoleRequestModel>> streamAllRoleRequests() => _db
-          .collection(AppConstants.roleRequestsCollection)
-          .snapshots()
-          .map((snap) {
+      .collection(AppConstants.roleRequestsCollection)
+      .snapshots()
+      .map((snap) {
         final items = snap.docs
             .map((d) => RoleRequestModel.fromMap(d.id, d.data()))
             .toList();
@@ -607,21 +848,27 @@ class FirestoreService {
     required String adminUid,
   }) async {
     final batch = _db.batch()
-      ..update(_users.doc(request.uid), {
-        'role': request.requestedRole.value,
-      })
+      ..update(_users.doc(request.uid), {'role': request.requestedRole.value})
       ..update(_roleRequest(request.uid), {
         'status': RoleRequestStatus.approved.value,
         'decidedBy': adminUid,
         'decidedAt': FieldValue.serverTimestamp(),
       });
+    _stageAdminAudit(
+      batch,
+      action: 'role_request_approved',
+      targetType: 'user',
+      targetId: request.uid,
+      summary: 'Approved role request to ${request.requestedRole.label}.',
+    );
     await batch.commit();
     try {
       await addNotification(
         request.uid,
         NotificationModel(
           type: NotificationType.system,
-          message: 'Your role is now ${request.requestedRole.label}. '
+          message:
+              'Your role is now ${request.requestedRole.label}. '
               'Your features have been updated.',
           relatedId: 'role:${request.uid}',
         ),
@@ -637,18 +884,28 @@ class FirestoreService {
     required String adminUid,
     String note = '',
   }) async {
-    await _roleRequest(request.uid).update({
-      'status': RoleRequestStatus.rejected.value,
-      'adminNote': note.trim(),
-      'decidedBy': adminUid,
-      'decidedAt': FieldValue.serverTimestamp(),
-    });
+    final batch = _db.batch()
+      ..update(_roleRequest(request.uid), {
+        'status': RoleRequestStatus.rejected.value,
+        'adminNote': note.trim(),
+        'decidedBy': adminUid,
+        'decidedAt': FieldValue.serverTimestamp(),
+      });
+    _stageAdminAudit(
+      batch,
+      action: 'role_request_rejected',
+      targetType: 'user',
+      targetId: request.uid,
+      summary: 'Rejected role request to ${request.requestedRole.label}.',
+    );
+    await batch.commit();
     try {
       await addNotification(
         request.uid,
         NotificationModel(
           type: NotificationType.system,
-          message: 'Your request to become ${request.requestedRole.label} '
+          message:
+              'Your request to become ${request.requestedRole.label} '
               'was declined${note.trim().isEmpty ? '.' : ': ${note.trim()}'}',
           relatedId: 'role:${request.uid}',
         ),
@@ -661,13 +918,29 @@ class FirestoreService {
   Future<void> updateSwapOfferStatus(
     String offerId,
     SwapOfferStatus status,
-  ) =>
-      _swapOffers.doc(offerId).update({'status': status.value});
+  ) async {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    await _requireMarketplaceAccount(actorUid, action: 'update swap offers');
+    if (status == SwapOfferStatus.accepted) {
+      throw StateError('Use the swap acceptance flow to accept an offer.');
+    }
+    final ref = _swapOffers.doc(offerId);
+    final snap = await ref.get();
+    final data = snap.data();
+    if (data == null) throw StateError('This offer no longer exists.');
+    final offer = SwapOfferModel.fromMap(snap.id, data);
+    if (actorUid != offer.offeredById && actorUid != offer.sellerId) {
+      throw StateError('Only the offerer or seller can update this offer.');
+    }
+    await ref.update({'status': status.value});
+  }
 
   /// Every swap offer made on a seller's listings (all statuses), newest
   /// first. Filter `status == pending` client-side for the inbox.
   Stream<List<SwapOfferModel>> streamSellerOffers(String sellerId) =>
-      _swapOffers.where('sellerId', isEqualTo: sellerId).snapshots().map((snap) {
+      _swapOffers.where('sellerId', isEqualTo: sellerId).snapshots().map((
+        snap,
+      ) {
         final offers = snap.docs
             .map((d) => SwapOfferModel.fromMap(d.id, d.data()))
             .toList();
@@ -681,14 +954,27 @@ class FirestoreService {
   /// Returns the transaction id.
   Future<String> acceptSwapOffer(SwapOfferModel offer) async {
     // Fee hold blocks swap accepts (enforced here, in the UI and rules).
-    final seller = await getUser(offer.sellerId.isNotEmpty
+    final actorUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final listing = await getListing(offer.listingId);
+    final sellerId = offer.sellerId.isNotEmpty
         ? offer.sellerId
-        : (await getListing(offer.listingId))?.sellerId ?? '');
-    if (seller != null && seller.accountStatus == AccountStatus.onHold) {
+        : listing?.sellerId ?? '';
+    if (actorUid != sellerId) {
+      throw StateError('Only the listing seller can accept this offer.');
+    }
+    final seller = await _requireMarketplaceAccount(
+      sellerId,
+      action: 'accept swap offers',
+    );
+    if (!seller.role.canSell) {
+      throw StateError('Only Customer + Seller accounts can accept swaps.');
+    }
+    if (seller.accountStatus == AccountStatus.onHold) {
       throw StateError(
         'Your shop is on hold over unpaid fees — pay them to accept swaps.',
       );
     }
+    if (listing == null) throw StateError('This listing no longer exists.');
     final listingRef = _listings.doc(offer.listingId);
     final offerRef = _swapOffers.doc(offer.offerId);
     final txnRef = _transactions.doc('swap_${offer.offerId}');
@@ -739,7 +1025,10 @@ class FirestoreService {
   }
 
   Stream<List<SwapOfferModel>> streamOffersForListing(String listingId) =>
-      _swapOffers.where('listingId', isEqualTo: listingId).snapshots().map(
+      _swapOffers
+          .where('listingId', isEqualTo: listingId)
+          .snapshots()
+          .map(
             (snap) => snap.docs
                 .map((d) => SwapOfferModel.fromMap(d.id, d.data()))
                 .toList(),
@@ -750,6 +1039,19 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
 
   Future<String> createTransaction(TransactionModel txn) async {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    await _requireMarketplaceAccount(actorUid, action: 'start transactions');
+    if (actorUid != txn.buyerId && actorUid != txn.sellerId) {
+      throw StateError('You can only start a transaction you are part of.');
+    }
+    await _requireMarketplaceAccount(txn.buyerId, action: 'start transactions');
+    await _requireMarketplaceAccount(
+      txn.sellerId,
+      action: 'start transactions',
+    );
+    if (txn.buyerId == txn.sellerId) {
+      throw StateError('A deal must be between two different users.');
+    }
     final ref = _transactions.doc();
     final data = txn.copyWith(transactionId: ref.id).toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
@@ -761,16 +1063,24 @@ class FirestoreService {
     String transactionId,
     TransactionStatus status,
   ) async {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    await _requireMarketplaceAccount(actorUid, action: 'change deal status');
+    final txnSnap = await _transactions.doc(transactionId).get();
+    final txnData = txnSnap.data();
+    if (txnData == null) throw StateError('This deal no longer exists.');
+    final txn = TransactionModel.fromMap(txnSnap.id, txnData);
+    if (actorUid != txn.buyerId && actorUid != txn.sellerId) {
+      throw StateError('Only the buyer or seller can change deal status.');
+    }
     await _transactions.doc(transactionId).update({'status': status.value});
     await _refreshTrustForDeal(transactionId);
   }
 
   /// All of a seller's transactions, newest first.
   Stream<List<TransactionModel>> streamSellerTransactions(String sellerId) =>
-      _transactions
-          .where('sellerId', isEqualTo: sellerId)
-          .snapshots()
-          .map((snap) {
+      _transactions.where('sellerId', isEqualTo: sellerId).snapshots().map((
+        snap,
+      ) {
         final items = snap.docs
             .map((d) => TransactionModel.fromMap(d.id, d.data()))
             .toList();
@@ -822,16 +1132,20 @@ class FirestoreService {
     out = StreamController<List<TransactionModel>>(
       onListen: () {
         subs
-          ..add(streamBuyerTransactions(uid).listen((v) {
-            buying = v;
-            gotBuying = true;
-            emit();
-          }, onError: out.addError))
-          ..add(streamSellerTransactions(uid).listen((v) {
-            selling = v;
-            gotSelling = true;
-            emit();
-          }, onError: out.addError));
+          ..add(
+            streamBuyerTransactions(uid).listen((v) {
+              buying = v;
+              gotBuying = true;
+              emit();
+            }, onError: out.addError),
+          )
+          ..add(
+            streamSellerTransactions(uid).listen((v) {
+              selling = v;
+              gotSelling = true;
+              emit();
+            }, onError: out.addError),
+          );
       },
       onCancel: () async {
         for (final s in subs) {
@@ -848,12 +1162,14 @@ class FirestoreService {
           .orderBy('timestamp', descending: true)
           .limit(1)
           .snapshots()
-          .map((snap) => snap.docs.isEmpty
-              ? null
-              : ChatMessageModel.fromMap(
-                  snap.docs.first.id,
-                  snap.docs.first.data(),
-                ));
+          .map(
+            (snap) => snap.docs.isEmpty
+                ? null
+                : ChatMessageModel.fromMap(
+                    snap.docs.first.id,
+                    snap.docs.first.data(),
+                  ),
+          );
 
   // ---------------------------------------------------------------------------
   // chats/{transactionId}/messages
@@ -881,9 +1197,11 @@ class FirestoreService {
       _messages(transactionId)
           .orderBy('timestamp')
           .snapshots()
-          .map((snap) => snap.docs
-              .map((d) => ChatMessageModel.fromMap(d.id, d.data()))
-              .toList());
+          .map(
+            (snap) => snap.docs
+                .map((d) => ChatMessageModel.fromMap(d.id, d.data()))
+                .toList(),
+          );
 
   // ---------------------------------------------------------------------------
   // ratings
@@ -899,12 +1217,11 @@ class FirestoreService {
 
   /// Reviews about [uid], newest first. Equality filter only + client sort
   /// (where+orderBy needs a composite index, which is not deployed).
-  Stream<List<RatingModel>> streamRatingsForUser(String uid) => _ratings
-      .where('ratedUserId', isEqualTo: uid)
-      .snapshots()
-      .map((snap) {
-        final items =
-            snap.docs.map((d) => RatingModel.fromMap(d.id, d.data())).toList();
+  Stream<List<RatingModel>> streamRatingsForUser(String uid) =>
+      _ratings.where('ratedUserId', isEqualTo: uid).snapshots().map((snap) {
+        final items = snap.docs
+            .map((d) => RatingModel.fromMap(d.id, d.data()))
+            .toList();
         items.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
         return items;
       });
@@ -917,7 +1234,17 @@ class FirestoreService {
     final ref = _reports.doc();
     final data = report.copyWith(reportId: ref.id).toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
-    await ref.set(data);
+    final staff = await _staffUsers();
+    final batch = _db.batch()..set(ref, data);
+    _stageStaffNotification(
+      batch,
+      staff,
+      message: 'A new ${report.targetType.value} report is waiting for review.',
+      relatedId: report.targetType == ReportTargetType.rating
+          ? 'ratingReport:${ref.id}'
+          : 'report:${ref.id}',
+    );
+    await batch.commit();
     await _refreshTrustForReport(report.targetType, report.targetId);
     return ref.id;
   }
@@ -929,18 +1256,54 @@ class FirestoreService {
   Future<void> seedCategories(List<CategoryModel> categories) async {
     final batch = _db.batch();
     for (final c in categories) {
-      final ref =
-          c.categoryId.isEmpty ? _categories.doc() : _categories.doc(c.categoryId);
+      final ref = c.categoryId.isEmpty
+          ? _categories.doc()
+          : _categories.doc(c.categoryId);
       batch.set(ref, c.copyWith(categoryId: ref.id).toMap());
     }
+    if (categories.isNotEmpty) {
+      _stageAdminAudit(
+        batch,
+        action: 'categories_created',
+        targetType: 'categories',
+        targetId: '',
+        summary: 'Created ${categories.length} categories.',
+      );
+    }
     await batch.commit();
+  }
+
+  /// Creates the category first so an unavailable audit-log write cannot
+  /// make the category itself appear to fail. Returns false only when the
+  /// category was saved but its audit entry could not be recorded.
+  Future<bool> createCategory(CategoryModel category) async {
+    final ref = _categories.doc();
+    await ref.set(category.copyWith(categoryId: ref.id).toMap());
+    try {
+      final audit = _db.batch();
+      _stageAdminAudit(
+        audit,
+        action: 'categories_created',
+        targetType: 'category',
+        targetId: ref.id,
+        summary: 'Created category "${category.name}".',
+      );
+      await audit.commit();
+      return true;
+    } catch (e) {
+      debugPrint('createCategory audit: $e');
+      return false;
+    }
   }
 
   Stream<List<CategoryModel>> streamCategories() => _categories
       .orderBy('sortOrder')
       .snapshots()
-      .map((snap) =>
-          snap.docs.map((d) => CategoryModel.fromMap(d.id, d.data())).toList());
+      .map(
+        (snap) => snap.docs
+            .map((d) => CategoryModel.fromMap(d.id, d.data()))
+            .toList(),
+      );
 
   // ---------------------------------------------------------------------------
   // notifications/{uid}/items
@@ -951,6 +1314,49 @@ class FirestoreService {
           .collection(AppConstants.notificationsCollection)
           .doc(uid)
           .collection(AppConstants.notificationsItemsSubcollection);
+
+  Future<UserModel> _requireMarketplaceAccount(
+    String uid, {
+    required String action,
+  }) async {
+    if (uid.isEmpty) {
+      throw StateError('Sign in before you $action.');
+    }
+    final user = await getUser(uid);
+    if (user == null) {
+      throw StateError('Complete your profile before you $action.');
+    }
+    if (!user.role.canUseMarketplace) {
+      throw StateError('Administrator accounts cannot $action.');
+    }
+    return user;
+  }
+
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+  _staffUsers() async {
+    final snapshots = await Future.wait([
+      _users.where('role', isEqualTo: UserRole.admin.value).get(),
+      _users.where('role', isEqualTo: UserRole.superadmin.value).get(),
+    ]);
+    return snapshots.expand((snapshot) => snapshot.docs).toList();
+  }
+
+  void _stageStaffNotification(
+    WriteBatch batch,
+    Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> staff, {
+    required String message,
+    required String relatedId,
+  }) {
+    for (final user in staff) {
+      batch.set(_notificationItems(user.id).doc(), {
+        'type': NotificationType.system.value,
+        'message': message,
+        'relatedId': relatedId,
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+  }
 
   Future<void> addNotification(String uid, NotificationModel n) async {
     await _notificationItems(uid).add({
@@ -967,6 +1373,9 @@ class FirestoreService {
   Future<void> awardTrustedBadge(String uid) async {
     final userRef = _users.doc(uid);
     final notificationRef = _notificationItems(uid).doc();
+    final actorUid = FirebaseAuth.instance.currentUser?.uid;
+    if (actorUid == null) throw StateError('An admin session is required.');
+    final auditRef = _auditLogs.doc();
     await _db.runTransaction((transaction) async {
       final user = await transaction.get(userRef);
       final data = user.data();
@@ -976,9 +1385,18 @@ class FirestoreService {
       }
       if (data['trustedBadge'] == true) return;
       transaction.update(userRef, {'trustedBadge': true});
+      transaction.set(auditRef, {
+        'actorUid': actorUid,
+        'action': 'trusted_badge_awarded',
+        'targetType': 'user',
+        'targetId': uid,
+        'summary': 'Awarded the Trusted Seller badge.',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
       transaction.set(notificationRef, {
         'type': NotificationType.system.value,
-        'message': 'Congratulations! An admin reviewed your account and '
+        'message':
+            'Congratulations! An admin reviewed your account and '
             'awarded you the Trusted Seller badge.',
         'relatedId': 'trust:$uid',
         'read': false,
@@ -992,17 +1410,20 @@ class FirestoreService {
           .orderBy('createdAt', descending: true)
           .limit(50)
           .snapshots()
-          .map((snap) => snap.docs
-              .map((d) => NotificationModel.fromMap(d.id, d.data()))
-              .toList());
+          .map(
+            (snap) => snap.docs
+                .map((d) => NotificationModel.fromMap(d.id, d.data()))
+                .toList(),
+          );
 
   Future<void> markNotificationRead(String uid, String notificationId) =>
       _notificationItems(uid).doc(notificationId).update({'read': true});
 
   /// Marks every unread item read. Equality-only fetch, batched writes.
   Future<void> markAllNotificationsRead(String uid) async {
-    final snap =
-        await _notificationItems(uid).where('read', isEqualTo: false).get();
+    final snap = await _notificationItems(uid)
+        .where('read', isEqualTo: false)
+        .get();
     if (snap.docs.isEmpty) return;
     final batch = _db.batch();
     for (final d in snap.docs) {
@@ -1016,21 +1437,21 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
 
   /// Users holding the Trusted badge, newest-rating first (client sort).
-  Stream<List<UserModel>> streamTrustedUsers() => _users
-      .where('trustedBadge', isEqualTo: true)
-      .snapshots()
-      .map((snap) {
-    final users =
-        snap.docs.map((d) => UserModel.fromMap(d.id, d.data())).toList();
-    users.sort((a, b) => b.avgRating.compareTo(a.avgRating));
-    return users;
-  });
+  Stream<List<UserModel>> streamTrustedUsers() =>
+      _users.where('trustedBadge', isEqualTo: true).snapshots().map((snap) {
+        final users = snap.docs
+            .map((d) => UserModel.fromMap(d.id, d.data()))
+            .toList();
+        users.sort((a, b) => b.avgRating.compareTo(a.avgRating));
+        return users;
+      });
 
   /// Bids placed by [uid], newest first (client sort).
   Stream<List<BidModel>> streamBidsForBidder(String uid) =>
       _bids.where('bidderId', isEqualTo: uid).snapshots().map((snap) {
-        final bids =
-            snap.docs.map((d) => BidModel.fromMap(d.id, d.data())).toList();
+        final bids = snap.docs
+            .map((d) => BidModel.fromMap(d.id, d.data()))
+            .toList();
         bids.sort((a, b) => _compareNullableDates(b.placedAt, a.placedAt));
         return bids;
       });
@@ -1088,13 +1509,17 @@ class FirestoreService {
     final reportsF = _reports
         .where('status', isEqualTo: ReportStatus.pending.value)
         .get();
-    final adminsF =
-        _users.where('role', isEqualTo: UserRole.admin.value).get();
+    final adminsF = _users.where('role', isEqualTo: UserRole.admin.value).get();
+    final superadminsF = _users
+        .where('role', isEqualTo: UserRole.superadmin.value)
+        .get();
     final ratings = await ratingsF;
     final txns = await txnsF;
     final listings = await listingsF;
     final reports = await reportsF;
     final admins = await adminsF;
+    final superadmins = await superadminsF;
+    final staff = [...admins.docs, ...superadmins.docs];
 
     final openReports = TrustReview.openReportsFor(
       uid: uid,
@@ -1124,7 +1549,7 @@ class FirestoreService {
       );
       final hadBadge = data['trustedBadge'] == true;
       final notified = data['trustedEligibilityNotified'] == true;
-      final notifyAdmins = r.eligible && !notified && admins.docs.isNotEmpty;
+      final notifyAdmins = r.eligible && !notified && staff.isNotEmpty;
       final removed = hadBadge && !r.eligible;
       tx.update(userRef, {
         'avgRating': (r.avgRating * 10).round() / 10,
@@ -1140,10 +1565,11 @@ class FirestoreService {
         final name = rawName.isNotEmpty
             ? rawName
             : (data['email'] as String? ?? 'A seller');
-        for (final a in admins.docs) {
+        for (final a in staff) {
           tx.set(_notificationItems(a.id).doc(), {
             'type': NotificationType.system.value,
-            'message': '$name meets the Trusted Seller requirements. Review '
+            'message':
+                '$name meets the Trusted Seller requirements. Review '
                 'their User Details before awarding the badge.',
             'relatedId': 'trust:$uid',
             'read': false,
@@ -1154,7 +1580,8 @@ class FirestoreService {
       if (removed) {
         tx.set(_notificationItems(uid).doc(), {
           'type': NotificationType.system.value,
-          'message': 'Your Trusted Seller badge was removed because your '
+          'message':
+              'Your Trusted Seller badge was removed because your '
               'account no longer meets the eligibility requirements.',
           'relatedId': 'trust:$uid',
           'read': false,
@@ -1233,6 +1660,7 @@ class FirestoreService {
     required String listingId,
     required String buyerId,
   }) async {
+    await _requireMarketplaceAccount(buyerId, action: 'buy items');
     final listingRef = _listings.doc(listingId);
     final txnRef = _transactions.doc();
 
@@ -1263,8 +1691,7 @@ class FirestoreService {
         // have not reached it yet.
         dealType = ListingType.bid.value;
         finalPrice = buyNowPrice!;
-      } else if (listingType == ListingType.bid.value &&
-          buyNowPrice != null) {
+      } else if (listingType == ListingType.bid.value && buyNowPrice != null) {
         throw StateError('Buy It Now is closed for this auction.');
       } else {
         throw StateError('This item is not purchasable right now.');
@@ -1306,7 +1733,8 @@ class FirestoreService {
         listing.sellerId,
         NotificationModel(
           type: NotificationType.transactionUpdate,
-          message: 'Your item "${listing.title}" just sold. '
+          message:
+              'Your item "${listing.title}" just sold. '
               'Platform fee ${AppUtils.formatCurrency(fee)} due in '
               '${AppConstants.feeDueDays} days.',
           relatedId: 'transaction:${txnRef.id}',
@@ -1323,14 +1751,13 @@ class FirestoreService {
     required String buyerId,
     required String sellerId,
     required String listingId,
-  }) =>
-      _db.collection(AppConstants.chatsCollection).doc(transactionId).set({
-        'transactionId': transactionId,
-        'buyerId': buyerId,
-        'sellerId': sellerId,
-        'listingId': listingId,
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+  }) => _db.collection(AppConstants.chatsCollection).doc(transactionId).set({
+    'transactionId': transactionId,
+    'buyerId': buyerId,
+    'sellerId': sellerId,
+    'listingId': listingId,
+    'createdAt': FieldValue.serverTimestamp(),
+  }, SetOptions(merge: true));
 
   // ---------------------------------------------------------------------------
   // admin (Phase 4): whole-collection streams, client-side sort/filter.
@@ -1338,13 +1765,13 @@ class FirestoreService {
   // ---------------------------------------------------------------------------
 
   /// Every user doc, newest first (client sort).
-  Stream<List<UserModel>> streamAllUsers() =>
-      _users.snapshots().map((snap) {
-        final users =
-            snap.docs.map((d) => UserModel.fromMap(d.id, d.data())).toList();
-        users.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
-        return users;
-      });
+  Stream<List<UserModel>> streamAllUsers() => _users.snapshots().map((snap) {
+    final users = snap.docs
+        .map((d) => UserModel.fromMap(d.id, d.data()))
+        .toList();
+    users.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+    return users;
+  });
 
   /// Every listing regardless of status, newest first (client sort).
   Stream<List<ListingModel>> streamAllListings() =>
@@ -1368,8 +1795,14 @@ class FirestoreService {
 
   /// Listings in one category (admin counts, reassign on delete).
   Stream<List<ListingModel>> streamListingsByCategory(String category) =>
-      _listings.where('category', isEqualTo: category).snapshots().map((snap) =>
-          snap.docs.map((d) => ListingModel.fromMap(d.id, d.data())).toList());
+      _listings
+          .where('category', isEqualTo: category)
+          .snapshots()
+          .map(
+            (snap) => snap.docs
+                .map((d) => ListingModel.fromMap(d.id, d.data()))
+                .toList(),
+          );
 
   /// Reports with one status, oldest first (pending urgency).
   Stream<List<ReportModel>> streamReportsByStatus(ReportStatus status) =>
@@ -1377,8 +1810,7 @@ class FirestoreService {
         final reports = snap.docs
             .map((d) => ReportModel.fromMap(d.id, d.data()))
             .toList();
-        reports
-            .sort((a, b) => _compareNullableDates(a.createdAt, b.createdAt));
+        reports.sort((a, b) => _compareNullableDates(a.createdAt, b.createdAt));
         return reports;
       });
 
@@ -1388,8 +1820,7 @@ class FirestoreService {
         final reports = snap.docs
             .map((d) => ReportModel.fromMap(d.id, d.data()))
             .toList();
-        reports
-            .sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
+        reports.sort((a, b) => _compareNullableDates(b.createdAt, a.createdAt));
         return reports;
       });
 
@@ -1399,21 +1830,33 @@ class FirestoreService {
     for (var i = 0; i < categoryIdsInOrder.length; i++) {
       batch.update(_categories.doc(categoryIdsInOrder[i]), {'sortOrder': i});
     }
+    _stageAdminAudit(
+      batch,
+      action: 'categories_reordered',
+      targetType: 'categories',
+      targetId: '',
+      summary: 'Reordered ${categoryIdsInOrder.length} categories.',
+    );
     await batch.commit();
   }
 
   /// Every report ever filed against one target (prior-strikes context).
   Future<List<ReportModel>> reportsForTarget(String targetId) async {
-    final snap =
-        await _reports.where('targetId', isEqualTo: targetId).get();
+    final snap = await _reports.where('targetId', isEqualTo: targetId).get();
     return snap.docs.map((d) => ReportModel.fromMap(d.id, d.data())).toList();
   }
 
-  Future<void> updateReportStatus(
-    String reportId,
-    ReportStatus status,
-  ) async {
-    await _reports.doc(reportId).update({'status': status.value});
+  Future<void> updateReportStatus(String reportId, ReportStatus status) async {
+    final batch = _db.batch()
+      ..update(_reports.doc(reportId), {'status': status.value});
+    _stageAdminAudit(
+      batch,
+      action: 'report_status_changed',
+      targetType: 'report',
+      targetId: reportId,
+      summary: 'Changed report status to ${status.value}.',
+    );
+    await batch.commit();
     try {
       final d = await _reports.doc(reportId).get();
       final data = d.data();
@@ -1429,14 +1872,20 @@ class FirestoreService {
   /// Admin moderation. Re-activating also clears any fee hold (manual
   /// flag + hidden listings); the automatic hold re-applies at the next
   /// check if fees are still overdue.
-  Future<void> updateAccountStatus(
-    String uid,
-    AccountStatus status,
-  ) async {
-    await _users.doc(uid).update({
-      'accountStatus': status.value,
-      if (status == AccountStatus.active) 'holdManual': false,
-    });
+  Future<void> updateAccountStatus(String uid, AccountStatus status) async {
+    final batch = _db.batch()
+      ..update(_users.doc(uid), {
+        'accountStatus': status.value,
+        if (status == AccountStatus.active) 'holdManual': false,
+      });
+    _stageAdminAudit(
+      batch,
+      action: 'account_status_changed',
+      targetType: 'user',
+      targetId: uid,
+      summary: 'Changed account status to ${status.value}.',
+    );
+    await batch.commit();
     if (status == AccountStatus.active) {
       await setListingsHidden(uid, false);
     }
@@ -1445,16 +1894,33 @@ class FirestoreService {
   Future<void> updateCategory(
     String categoryId,
     Map<String, dynamic> data,
-  ) =>
-      _categories.doc(categoryId).update(data);
+  ) async {
+    final batch = _db.batch()..update(_categories.doc(categoryId), data);
+    _stageAdminAudit(
+      batch,
+      action: 'category_updated',
+      targetType: 'category',
+      targetId: categoryId,
+      summary: 'Updated category fields: ${data.keys.join(', ')}.',
+    );
+    await batch.commit();
+  }
 
-  Future<void> deleteCategory(String categoryId) =>
-      _categories.doc(categoryId).delete();
+  Future<void> deleteCategory(String categoryId) async {
+    final batch = _db.batch()..delete(_categories.doc(categoryId));
+    _stageAdminAudit(
+      batch,
+      action: 'category_deleted',
+      targetType: 'category',
+      targetId: categoryId,
+      summary: 'Deleted a category.',
+    );
+    await batch.commit();
+  }
 
   /// Moves every listing in [oldName] to "Uncategorized" (delete guard).
   Future<int> reassignCategoryListings(String oldName) async {
-    final snap =
-        await _listings.where('category', isEqualTo: oldName).get();
+    final snap = await _listings.where('category', isEqualTo: oldName).get();
     if (snap.docs.isEmpty) return 0;
     final batch = _db.batch();
     for (final d in snap.docs) {
@@ -1471,8 +1937,17 @@ class FirestoreService {
   }
 
   /// Deletes a review; caller refreshes the rated user's average.
-  Future<void> deleteRating(String ratingId) =>
-      _ratings.doc(ratingId).delete();
+  Future<void> deleteRating(String ratingId) async {
+    final batch = _db.batch()..delete(_ratings.doc(ratingId));
+    _stageAdminAudit(
+      batch,
+      action: 'rating_deleted',
+      targetType: 'rating',
+      targetId: ratingId,
+      summary: 'Removed a reported rating.',
+    );
+    await batch.commit();
+  }
 
   // ---------------------------------------------------------------------------
   // monetization (demo — simulated GCash, no real money)
@@ -1518,10 +1993,8 @@ class FirestoreService {
     var gotCurrent = false;
     var gotLegacy = false;
     final subs = <StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>[];
-    List<PaymentModel> parse(QuerySnapshot<Map<String, dynamic>> snap) => snap
-        .docs
-        .map((d) => PaymentModel.fromMap(d.id, d.data()))
-        .toList();
+    List<PaymentModel> parse(QuerySnapshot<Map<String, dynamic>> snap) =>
+        snap.docs.map((d) => PaymentModel.fromMap(d.id, d.data())).toList();
     void emit() {
       if (gotCurrent && gotLegacy) out.add(mergePayments(current, legacy));
     }
@@ -1529,24 +2002,31 @@ class FirestoreService {
     out = StreamController<List<PaymentModel>>(
       onListen: () {
         subs
-          ..add(_payments.snapshots().listen((snap) {
-            current = parse(snap);
-            gotCurrent = true;
-            emit();
-          }, onError: out.addError))
-          ..add(_db
-              .collection(AppConstants.legacyPaymentsCollection)
-              .snapshots()
-              .listen((snap) {
-            legacy = parse(snap);
-            gotLegacy = true;
-            emit();
-          }, onError: (Object e) {
-            // Legacy records are optional: never block current revenue.
-            debugPrint('legacy payments: $e');
-            gotLegacy = true;
-            emit();
-          }));
+          ..add(
+            _payments.snapshots().listen((snap) {
+              current = parse(snap);
+              gotCurrent = true;
+              emit();
+            }, onError: out.addError),
+          )
+          ..add(
+            _db
+                .collection(AppConstants.legacyPaymentsCollection)
+                .snapshots()
+                .listen(
+                  (snap) {
+                    legacy = parse(snap);
+                    gotLegacy = true;
+                    emit();
+                  },
+                  onError: (Object e) {
+                    // Legacy records are optional: never block current revenue.
+                    debugPrint('legacy payments: $e');
+                    gotLegacy = true;
+                    emit();
+                  },
+                ),
+          );
       },
       onCancel: () async {
         for (final s in subs) {
@@ -1587,8 +2067,9 @@ class FirestoreService {
     final user = await getUser(uid);
     if (user == null) throw StateError('Profile not found.');
     final now = DateTime.now();
-    final base =
-        user.effectivePlan == plan ? extendFrom(user.planUntil, now) : now;
+    final base = user.effectivePlan == plan
+        ? extendFrom(user.planUntil, now)
+        : now;
     final until = base.add(const Duration(days: AppConstants.planDays));
     final payRef = _payments.doc();
     final batch = _db.batch()
@@ -1626,8 +2107,10 @@ class FirestoreService {
     if (price == null) throw StateError('Unknown boost length.');
     final user = await getUser(uid);
     if (user == null) throw StateError('Profile not found.');
-    final until =
-        extendFrom(user.boostedUntil, DateTime.now()).add(Duration(days: days));
+    final until = extendFrom(
+      user.boostedUntil,
+      DateTime.now(),
+    ).add(Duration(days: days));
     final payRef = _payments.doc();
     final batch = _db.batch()
       ..set(
@@ -1667,8 +2150,10 @@ class FirestoreService {
       throw StateError('Only active listings can be featured.');
     }
     const days = AppConstants.featuredDays;
-    final until = extendFrom(listing.featuredUntil, DateTime.now())
-        .add(const Duration(days: days));
+    final until = extendFrom(
+      listing.featuredUntil,
+      DateTime.now(),
+    ).add(const Duration(days: days));
     final payRef = _payments.doc();
     final batch = _db.batch()
       ..set(
@@ -1748,26 +2233,33 @@ class FirestoreService {
         DateTime.now().difference(last) < AppConstants.bumpCooldown) {
       throw StateError('Already bumped — try again tomorrow.');
     }
-    await _listings
-        .doc(listing.listingId)
-        .update({'bumpedAt': FieldValue.serverTimestamp()});
+    await _listings.doc(listing.listingId).update({
+      'bumpedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   /// Pro perk: coral border + Hot tag for [AppConstants.highlightDays].
   Future<DateTime> highlightListing(String listingId) async {
-    final until = DateTime.now()
-        .add(const Duration(days: AppConstants.highlightDays));
-    await _listings
-        .doc(listingId)
-        .update({'highlightUntil': Timestamp.fromDate(until)});
+    final until = DateTime.now().add(
+      const Duration(days: AppConstants.highlightDays),
+    );
+    await _listings.doc(listingId).update({
+      'highlightUntil': Timestamp.fromDate(until),
+    });
     return until;
   }
 
   /// Cancels a deal AND voids its platform fee (swaps stay 'none').
   Future<void> cancelTransaction(String transactionId) async {
+    final actorUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    await _requireMarketplaceAccount(actorUid, action: 'cancel deals');
     final snap = await _transactions.doc(transactionId).get();
     final data = snap.data();
-    if (data == null) return;
+    if (data == null) throw StateError('This deal no longer exists.');
+    final txn = TransactionModel.fromMap(snap.id, data);
+    if (actorUid != txn.buyerId && actorUid != txn.sellerId) {
+      throw StateError('Only the buyer or seller can cancel this deal.');
+    }
     final update = <String, dynamic>{
       'status': TransactionStatus.cancelled.value,
     };
@@ -1790,12 +2282,11 @@ class FirestoreService {
     required String transactionId,
     required String sellerId,
     required String referenceNo,
-  }) =>
-      payFees(
-        sellerId: sellerId,
-        transactionIds: [transactionId],
-        referenceNo: referenceNo,
-      );
+  }) => payFees(
+    sellerId: sellerId,
+    transactionIds: [transactionId],
+    referenceNo: referenceNo,
+  );
 
   /// Pays the given unpaid fees under one reference: per fee, a `payments`
   /// record `fee_{transactionId}` + feeStatus 'paid' in one batch. When no
@@ -1809,8 +2300,9 @@ class FirestoreService {
   }) async {
     if (sellerId.isEmpty || transactionIds.isEmpty) return 0;
     final wanted = transactionIds.toSet();
-    final all =
-        await _transactions.where('sellerId', isEqualTo: sellerId).get();
+    final all = await _transactions
+        .where('sellerId', isEqualTo: sellerId)
+        .get();
     final now = DateTime.now();
     final toPay = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
     var overdueLeft = false;
@@ -1829,7 +2321,8 @@ class FirestoreService {
     }
 
     final user = await getUser(sellerId);
-    final lift = user != null &&
+    final lift =
+        user != null &&
         user.accountStatus == AccountStatus.onHold &&
         !user.holdManual &&
         !overdueLeft;
@@ -1888,8 +2381,9 @@ class FirestoreService {
         user.accountStatus == AccountStatus.banned) {
       return;
     }
-    final snap =
-        await _transactions.where('sellerId', isEqualTo: sellerId).get();
+    final snap = await _transactions
+        .where('sellerId', isEqualTo: sellerId)
+        .get();
     final now = DateTime.now();
     final overdue = snap.docs.any((d) {
       final data = d.data();
@@ -1898,22 +2392,25 @@ class FirestoreService {
       return due != null && !due.isAfter(now);
     });
     if (overdue && user.accountStatus == AccountStatus.active) {
-      await _users
-          .doc(sellerId)
-          .update({'accountStatus': AccountStatus.onHold.value});
+      await _users.doc(sellerId).update({
+        'accountStatus': AccountStatus.onHold.value,
+      });
       await setListingsHidden(sellerId, true);
     } else if (!overdue &&
         user.accountStatus == AccountStatus.onHold &&
         !user.holdManual) {
-      await _users
-          .doc(sellerId)
-          .update({'accountStatus': AccountStatus.active.value});
+      await _users.doc(sellerId).update({
+        'accountStatus': AccountStatus.active.value,
+      });
       await setListingsHidden(sellerId, false);
     }
   }
 
   /// Admin: manual hold (sticks until an admin lifts it) or lift. Refuses
   /// suspended/banned accounts — a hold must never replace a ban.
+  static bool hasOutstandingPlatformFee(Iterable<TransactionModel> txns) => txns
+      .any((txn) => txn.feeUnpaid && txn.status != TransactionStatus.cancelled);
+
   Future<void> adminSetFeeHold(String sellerId, {required bool hold}) async {
     final user = await getUser(sellerId);
     if (user == null) throw StateError('User not found.');
@@ -1924,22 +2421,49 @@ class FirestoreService {
         'Users first.',
       );
     }
-    await _users.doc(sellerId).update({
-      'accountStatus':
-          hold ? AccountStatus.onHold.value : AccountStatus.active.value,
-      'holdManual': hold,
-    });
+    if (hold) {
+      final feeSnap = await _transactions
+          .where('sellerId', isEqualTo: sellerId)
+          .get();
+      final sellerFees = feeSnap.docs.map(
+        (doc) => TransactionModel.fromMap(doc.id, doc.data()),
+      );
+      if (!hasOutstandingPlatformFee(sellerFees)) {
+        throw StateError(
+          'This account has no outstanding platform fees and cannot be held '
+          'from the Fees page.',
+        );
+      }
+    }
+    final batch = _db.batch()
+      ..update(_users.doc(sellerId), {
+        'accountStatus': hold
+            ? AccountStatus.onHold.value
+            : AccountStatus.active.value,
+        'holdManual': hold,
+      });
+    _stageAdminAudit(
+      batch,
+      action: hold ? 'manual_fee_hold_applied' : 'manual_fee_hold_removed',
+      targetType: 'user',
+      targetId: sellerId,
+      summary: hold
+          ? 'Applied a manual fee hold.'
+          : 'Removed a manual fee hold.',
+    );
+    await batch.commit();
     await setListingsHidden(sellerId, hold);
   }
 
   /// Flips the customer-visibility flag on a seller's ACTIVE listings.
   Future<void> setListingsHidden(String sellerId, bool hidden) async {
-    final snap =
-        await _listings.where('sellerId', isEqualTo: sellerId).get();
+    final snap = await _listings.where('sellerId', isEqualTo: sellerId).get();
     final docs = snap.docs
-        .where((d) =>
-            d.data()['status'] == ListingStatus.active.value &&
-            (d.data()['hidden'] == true) != hidden)
+        .where(
+          (d) =>
+              d.data()['status'] == ListingStatus.active.value &&
+              (d.data()['hidden'] == true) != hidden,
+        )
         .toList();
     for (var i = 0; i < docs.length; i += 400) {
       final batch = _db.batch();
@@ -2036,14 +2560,17 @@ class FirestoreService {
         final title = (data['listingTitle'] as String? ?? '').isEmpty
             ? 'a deal'
             : '"${data['listingTitle']}"';
-        final amount =
-            AppUtils.formatCurrency((data['feeAmount'] as num?)?.toDouble());
+        final amount = AppUtils.formatCurrency(
+          (data['feeAmount'] as num?)?.toDouble(),
+        );
         String? message;
         if (overdue) {
-          message = 'Platform fee $amount for $title is OVERDUE — pay now '
+          message =
+              'Platform fee $amount for $title is OVERDUE — pay now '
               'to lift the hold on your shop.';
         } else if (Fees.isReminderDay(created, now)) {
-          message = 'Reminder: platform fee $amount for $title is due '
+          message =
+              'Reminder: platform fee $amount for $title is due '
               '${due == null ? 'soon' : AppUtils.formatDate(due)}.';
         }
         if (message == null || await _recentFeeReminder(uid, d.id)) continue;
@@ -2088,13 +2615,39 @@ class FirestoreService {
     final ref = _partnerAds.doc();
     final data = ad.toMap();
     data['createdAt'] = FieldValue.serverTimestamp();
-    await ref.set({...data, 'adId': ref.id});
+    final batch = _db.batch()..set(ref, {...data, 'adId': ref.id});
+    _stageAdminAudit(
+      batch,
+      action: 'partner_ad_created',
+      targetType: 'partner_ad',
+      targetId: ref.id,
+      summary: 'Created partner ad "${ad.title}".',
+    );
+    await batch.commit();
     return ref.id;
   }
 
-  Future<void> updatePartnerAd(String adId, Map<String, dynamic> data) =>
-      _partnerAds.doc(adId).update(data);
+  Future<void> updatePartnerAd(String adId, Map<String, dynamic> data) async {
+    final batch = _db.batch()..update(_partnerAds.doc(adId), data);
+    _stageAdminAudit(
+      batch,
+      action: 'partner_ad_updated',
+      targetType: 'partner_ad',
+      targetId: adId,
+      summary: 'Updated partner ad fields: ${data.keys.join(', ')}.',
+    );
+    await batch.commit();
+  }
 
-  Future<void> deletePartnerAd(String adId) =>
-      _partnerAds.doc(adId).delete();
+  Future<void> deletePartnerAd(String adId) async {
+    final batch = _db.batch()..delete(_partnerAds.doc(adId));
+    _stageAdminAudit(
+      batch,
+      action: 'partner_ad_deleted',
+      targetType: 'partner_ad',
+      targetId: adId,
+      summary: 'Deleted a partner ad.',
+    );
+    await batch.commit();
+  }
 }

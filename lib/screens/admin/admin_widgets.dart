@@ -277,7 +277,8 @@ class AdminAvatar extends StatelessWidget {
             width: size,
             height: size,
             decoration: BoxDecoration(
-              color: u?.role == UserRole.admin
+              color: u?.role == UserRole.admin ||
+                      u?.role == UserRole.superadmin
                   ? AppColors.coral.withValues(alpha: 0.14)
                   : AppColors.mist,
               shape: BoxShape.circle,
@@ -292,7 +293,8 @@ class AdminAvatar extends StatelessWidget {
                     fit: BoxFit.cover,
                     errorWidget: (_, _, _) => _initialsText(initials),
                   )
-                : u?.role == UserRole.admin
+                : u?.role == UserRole.admin ||
+                        u?.role == UserRole.superadmin
                 ? Icon(
                     Icons.shield_outlined,
                     color: AppColors.coralDeep,

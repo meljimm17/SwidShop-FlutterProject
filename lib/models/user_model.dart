@@ -25,24 +25,23 @@ class AddressModel {
   }
 
   Map<String, dynamic> toMap() => {
-        'city': city,
-        'province': province,
-        'zipCode': zipCode,
-        'country': country,
-      };
+    'city': city,
+    'province': province,
+    'zipCode': zipCode,
+    'country': country,
+  };
 
   AddressModel copyWith({
     String? city,
     String? province,
     String? zipCode,
     String? country,
-  }) =>
-      AddressModel(
-        city: city ?? this.city,
-        province: province ?? this.province,
-        zipCode: zipCode ?? this.zipCode,
-        country: country ?? this.country,
-      );
+  }) => AddressModel(
+    city: city ?? this.city,
+    province: province ?? this.province,
+    zipCode: zipCode ?? this.zipCode,
+    country: country ?? this.country,
+  );
 }
 
 /// A SwidShop user. The Firestore document id is the Firebase Auth uid.
@@ -88,7 +87,7 @@ class UserModel {
 
   final String photoUrl;
 
-  /// One of: customer | seller | both | admin.
+  /// Customer roles plus staff-only admin and superadmin roles.
   final UserRole role;
 
   final AddressModel address;
@@ -189,45 +188,42 @@ class UserModel {
       planUntil: (map['planUntil'] as Timestamp?)?.toDate(),
       boostedUntil: (map['boostedUntil'] as Timestamp?)?.toDate(),
       holdManual: map['holdManual'] as bool? ?? false,
-      favorites: (map['favorites'] as List?)
-              ?.map((e) => e.toString())
-              .toList() ??
+      favorites:
+          (map['favorites'] as List?)?.map((e) => e.toString()).toList() ??
           const [],
-      following: (map['following'] as List?)
-              ?.map((e) => e.toString())
-              .toList() ??
+      following:
+          (map['following'] as List?)?.map((e) => e.toString()).toList() ??
           const [],
       createdAt: (map['createdAt'] as Timestamp?)?.toDate(),
     );
   }
 
   Map<String, dynamic> toMap() => {
-        'uid': uid,
-        'name': name,
-        'email': email,
-        'firstName': firstName,
-        'middleName': middleName,
-        'lastName': lastName,
-        'photoUrl': photoUrl,
-        'role': role.value,
-        'address': address.toMap(),
-        'dob': dob != null ? Timestamp.fromDate(dob!) : null,
-        'avgRating': avgRating,
-        'completedTransactions': completedTransactions,
-        'completionRate': completionRate,
-        'trustedBadge': trustedBadge,
-        'profileComplete': profileComplete,
-        'accountStatus': accountStatus.value,
-        'plan': plan,
-        'planUntil':
-            planUntil != null ? Timestamp.fromDate(planUntil!) : null,
-        'boostedUntil': boostedUntil != null
-            ? Timestamp.fromDate(boostedUntil!)
-            : null,
-        'favorites': favorites,
-        'following': following,
-        'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
-      };
+    'uid': uid,
+    'name': name,
+    'email': email,
+    'firstName': firstName,
+    'middleName': middleName,
+    'lastName': lastName,
+    'photoUrl': photoUrl,
+    'role': role.value,
+    'address': address.toMap(),
+    'dob': dob != null ? Timestamp.fromDate(dob!) : null,
+    'avgRating': avgRating,
+    'completedTransactions': completedTransactions,
+    'completionRate': completionRate,
+    'trustedBadge': trustedBadge,
+    'profileComplete': profileComplete,
+    'accountStatus': accountStatus.value,
+    'plan': plan,
+    'planUntil': planUntil != null ? Timestamp.fromDate(planUntil!) : null,
+    'boostedUntil': boostedUntil != null
+        ? Timestamp.fromDate(boostedUntil!)
+        : null,
+    'favorites': favorites,
+    'following': following,
+    'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
+  };
 
   UserModel copyWith({
     String? uid,
@@ -255,36 +251,33 @@ class UserModel {
     List<String>? favorites,
     List<String>? following,
     DateTime? createdAt,
-  }) =>
-      UserModel(
-        uid: uid ?? this.uid,
-        name: name ?? this.name,
-        email: email ?? this.email,
-        firstName: firstName ?? this.firstName,
-        middleName: middleName ?? this.middleName,
-        lastName: lastName ?? this.lastName,
-        photoUrl: photoUrl ?? this.photoUrl,
-        role: role ?? this.role,
-        address: address ?? this.address,
-        dob: dob ?? this.dob,
-        avgRating: avgRating ?? this.avgRating,
-        completedTransactions:
-            completedTransactions ?? this.completedTransactions,
-        completionRate: completionRate ?? this.completionRate,
-        trustedBadge: trustedBadge ?? this.trustedBadge,
-        trustedBadgeEligible:
-            trustedBadgeEligible ?? this.trustedBadgeEligible,
-        trustedOpenReports: trustedOpenReports ?? this.trustedOpenReports,
-        profileComplete: profileComplete ?? this.profileComplete,
-        accountStatus: accountStatus ?? this.accountStatus,
-        plan: plan ?? this.plan,
-        planUntil: planUntil ?? this.planUntil,
-        boostedUntil: boostedUntil ?? this.boostedUntil,
-        holdManual: holdManual ?? this.holdManual,
-        favorites: favorites ?? this.favorites,
-        following: following ?? this.following,
-        createdAt: createdAt ?? this.createdAt,
-      );
+  }) => UserModel(
+    uid: uid ?? this.uid,
+    name: name ?? this.name,
+    email: email ?? this.email,
+    firstName: firstName ?? this.firstName,
+    middleName: middleName ?? this.middleName,
+    lastName: lastName ?? this.lastName,
+    photoUrl: photoUrl ?? this.photoUrl,
+    role: role ?? this.role,
+    address: address ?? this.address,
+    dob: dob ?? this.dob,
+    avgRating: avgRating ?? this.avgRating,
+    completedTransactions: completedTransactions ?? this.completedTransactions,
+    completionRate: completionRate ?? this.completionRate,
+    trustedBadge: trustedBadge ?? this.trustedBadge,
+    trustedBadgeEligible: trustedBadgeEligible ?? this.trustedBadgeEligible,
+    trustedOpenReports: trustedOpenReports ?? this.trustedOpenReports,
+    profileComplete: profileComplete ?? this.profileComplete,
+    accountStatus: accountStatus ?? this.accountStatus,
+    plan: plan ?? this.plan,
+    planUntil: planUntil ?? this.planUntil,
+    boostedUntil: boostedUntil ?? this.boostedUntil,
+    holdManual: holdManual ?? this.holdManual,
+    favorites: favorites ?? this.favorites,
+    following: following ?? this.following,
+    createdAt: createdAt ?? this.createdAt,
+  );
 }
 
 /// Moderation state of an account. Missing on older docs → active.
@@ -302,11 +295,8 @@ enum AccountStatus {
 
   final String value;
 
-  static AccountStatus fromValue(String? value) =>
-      AccountStatus.values.firstWhere(
-        (e) => e.value == value,
-        orElse: () => AccountStatus.active,
-      );
+  static AccountStatus fromValue(String? value) => AccountStatus.values
+      .firstWhere((e) => e.value == value, orElse: () => AccountStatus.active);
 }
 
 /// The role a user plays within SwidShop: Customer, or Customer + Seller
@@ -315,7 +305,8 @@ enum AccountStatus {
 enum UserRole {
   customer('customer'),
   both('both'),
-  admin('admin');
+  admin('admin'),
+  superadmin('superadmin');
 
   const UserRole(this.value);
 
@@ -332,13 +323,19 @@ enum UserRole {
     );
   }
 
-  /// Customer + Seller (or admin) can post listings.
-  bool get canSell => this == UserRole.both || this == UserRole.admin;
+  bool get isStaff => this == UserRole.admin || this == UserRole.superadmin;
+
+  /// Only customer accounts can begin marketplace activity.
+  bool get canUseMarketplace => !isStaff;
+
+  /// Only Customer + Seller accounts can post listings.
+  bool get canSell => this == UserRole.both;
 
   /// Human label for screens ("Customer + Seller" for both).
   String get label => switch (this) {
-        UserRole.customer => 'Customer',
-        UserRole.both => 'Customer + Seller',
-        UserRole.admin => 'Admin',
-      };
+    UserRole.customer => 'Customer',
+    UserRole.both => 'Customer + Seller',
+    UserRole.admin => 'Admin',
+    UserRole.superadmin => 'Superadmin',
+  };
 }

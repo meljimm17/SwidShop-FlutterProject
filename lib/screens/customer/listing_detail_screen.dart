@@ -42,9 +42,8 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
   bool _needsLogin() {
     final auth = context.read<AuthProvider>();
     if (auth.isGuest || auth.firebaseUser == null) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-      );
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const LoginScreen()));
       return true;
     }
     return false;
@@ -104,8 +103,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                   style: TextStyle(fontSize: 14),
                 ),
                 value: targetSeller,
-                onChanged: (v) =>
-                    setSheet(() => targetSeller = v ?? false),
+                onChanged: (v) => setSheet(() => targetSeller = v ?? false),
               ),
             ],
           ),
@@ -153,9 +151,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Thanks — an admin will review this.'),
-          ),
+          const SnackBar(content: Text('Thanks — an admin will review this.')),
         );
       }
     } catch (e) {
@@ -173,6 +169,16 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
 
   void _cta(ListingModel listing) {
     if (_needsLogin()) return;
+    if (context.read<AuthProvider>().profile?.role.canUseMarketplace == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Administrator accounts cannot start marketplace deals.',
+          ),
+        ),
+      );
+      return;
+    }
     switch (listing.type) {
       case ListingType.buyNow:
         Navigator.of(context).push(
@@ -234,10 +240,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                       TypeBadge(listing.type),
                       const SizedBox(width: 8),
                       if (sold)
-                        StatusPill(
-                          listing.status.value,
-                          color: AppColors.gray,
-                        ),
+                        StatusPill(listing.status.value, color: AppColors.gray),
                     ],
                   ),
                   const SizedBox(height: 12),
@@ -272,8 +275,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                     listing.description.isEmpty
                         ? 'No description provided.'
                         : listing.description,
-                    style:
-                        const TextStyle(color: AppColors.ink, height: 1.5),
+                    style: const TextStyle(color: AppColors.ink, height: 1.5),
                   ),
                   if (listing.type == ListingType.bid) ...[
                     const SizedBox(height: 20),
@@ -295,8 +297,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
                       ),
                       label: const Text(
                         'Report this listing',
-                        style:
-                            TextStyle(color: AppColors.gray, fontSize: 13),
+                        style: TextStyle(color: AppColors.gray, fontSize: 13),
                       ),
                     ),
                   ),
@@ -367,8 +368,11 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
       return Container(
         height: 280,
         color: AppColors.cream,
-        child:
-            const Icon(Icons.image_outlined, size: 64, color: AppColors.gray),
+        child: const Icon(
+          Icons.image_outlined,
+          size: 64,
+          color: AppColors.gray,
+        ),
       );
     }
     return Column(
@@ -544,8 +548,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
           ),
           itemCount: specs.length,
           itemBuilder: (context, i) => Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: AppColors.surface,
               borderRadius: BorderRadius.circular(12),
@@ -557,10 +560,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
               children: [
                 Text(
                   specs[i].$1,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: AppColors.gray,
-                  ),
+                  style: const TextStyle(fontSize: 11, color: AppColors.gray),
                 ),
                 Text(
                   specs[i].$2,
@@ -626,8 +626,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
       decoration: BoxDecoration(
         color: AppColors.teal.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
-        border:
-            Border.all(color: AppColors.teal.withValues(alpha: 0.3)),
+        border: Border.all(color: AppColors.teal.withValues(alpha: 0.3)),
       ),
       child: Text(
         'Seller is looking for: ${listing.swapWants}',
@@ -637,6 +636,17 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
   }
 
   Widget _actions(ListingModel listing) {
+    final role = context.read<AuthProvider>().profile?.role;
+    if (role?.isStaff == true) {
+      return const Center(
+        child: Text(
+          'Administrator accounts cannot buy, bid or swap. Use the admin '
+          'console to review listings and support users.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: AppColors.gray),
+        ),
+      );
+    }
     // No self-dealing: owners manage their item from the Seller Centre.
     final mine =
         context.read<AuthProvider>().firebaseUser?.uid == listing.sellerId;
@@ -658,10 +668,7 @@ class _ListingDetailScreenState extends State<ListingDetailScreen> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            PrimaryButton(
-              label: 'Place a Bid',
-              onPressed: () => _cta(listing),
-            ),
+            PrimaryButton(label: 'Place a Bid', onPressed: () => _cta(listing)),
             // Pro add-on: instant-buy price, until bids reach it.
             if (listing.buyItNowOpen) ...[
               const SizedBox(height: 10),

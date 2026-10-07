@@ -353,11 +353,20 @@ class AdminProvider extends ChangeNotifier {
         _reportsLoaded = true;
         notifyListeners();
       }, onError: onError),
-      _firestore.streamAllPayments().listen((v) {
-        _purchases = v;
-        _purchasesLoaded = true;
-        notifyListeners();
-      }, onError: onError),
+      _firestore.streamAllPayments().listen(
+        (v) {
+          _purchases = v;
+          _paymentsError = null;
+          _purchasesLoaded = true;
+          notifyListeners();
+        },
+        onError: (Object e) {
+          debugPrint('AdminProvider payments stream error: $e');
+          _paymentsError = e;
+          _purchasesLoaded = true;
+          notifyListeners();
+        },
+      ),
       _firestore.streamAllPartnerAds().listen((v) {
         _ads = v;
         _adsLoaded = true;
@@ -427,6 +436,7 @@ class AdminProvider extends ChangeNotifier {
   bool _purchasesLoaded = false;
   bool _adsLoaded = false;
   Object? _error;
+  Object? _paymentsError;
 
   bool get isLoading =>
       !(_usersLoaded &&
@@ -436,6 +446,7 @@ class AdminProvider extends ChangeNotifier {
           _purchasesLoaded &&
           _adsLoaded);
   Object? get error => _error;
+  Object? get paymentsError => _paymentsError;
 
   List<UserModel> get users => _users;
   List<ListingModel> get listings => _listings;
@@ -446,8 +457,7 @@ class AdminProvider extends ChangeNotifier {
 
   /// Role-change requests, pending first.
   List<RoleRequestModel> get roleRequests => _roleRequests;
-  int get pendingRoleRequests =>
-      _roleRequests.where((r) => r.isPending).length;
+  int get pendingRoleRequests => _roleRequests.where((r) => r.isPending).length;
 
   UserModel? user(String uid) => _byUid[uid];
 

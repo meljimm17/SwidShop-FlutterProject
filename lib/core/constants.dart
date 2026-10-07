@@ -16,7 +16,7 @@ class AppConstants {
   static const String firebaseProjectId = 'swidshop-d8ccf';
 
   // ---------------------------------------------------------------------------
-  // Admin login (Login → "Admin login": username + password dialog).
+  // Demo administrator login (replace with managed identities before release).
   //
   // The username maps to one Firebase Auth account. Class-project setup:
   // before any real release, provision admins from the console and change
@@ -35,6 +35,11 @@ class AppConstants {
   /// Earlier password of [adminEmail]; migrated to [adminPassword] on the
   /// first successful admin login.
   static const String legacyAdminPassword = 'swidshop-admin-2026';
+
+  /// Shared demo superadmin credential; never use this in production.
+  static const String superAdminUsername = 'superadmin';
+  static const String superAdminPassword = 'superadmin123';
+  static const String superAdminEmail = 'superadmin@swidshop.demo';
 
   // ---------------------------------------------------------------------------
   // Cloudinary
@@ -117,6 +122,13 @@ class AppConstants {
 
   /// Partner banner ads (Step 6).
   static const String partnerAdsCollection = 'partnerAds';
+
+  /// Public customer announcement settings (single document: `public`).
+  static const String systemSettingsCollection = 'systemSettings';
+  static const String publicSystemSettingsDoc = 'public';
+
+  /// Immutable admin action history.
+  static const String adminAuditLogsCollection = 'adminAuditLogs';
 
   // ---------------------------------------------------------------------------
   // Monetization constants (demo only — no real money, no payment provider).

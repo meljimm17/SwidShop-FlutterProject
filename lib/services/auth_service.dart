@@ -21,8 +21,8 @@ enum GoogleSignInResult {
 /// Authentication facade over Firebase Auth (Email/Password + Google).
 class AuthService {
   AuthService({FirebaseAuth? auth, FirestoreService? firestore})
-      : _auth = auth ?? FirebaseAuth.instance,
-        _firestore = firestore ?? FirestoreService();
+    : _auth = auth ?? FirebaseAuth.instance,
+      _firestore = firestore ?? FirestoreService();
 
   final FirebaseAuth _auth;
   final FirestoreService _firestore;
@@ -78,23 +78,29 @@ class AuthService {
     required String email,
     required String password,
   }) =>
-      _auth.signInWithEmailAndPassword(
-        email: email.trim(),
-        password: password,
-      );
+      _auth.signInWithEmailAndPassword(email: email.trim(), password: password);
 
   /// True when [username]/[password] are the admin credentials.
   static bool isAdminLogin(String username, String password) =>
       username.trim().toLowerCase() == AppConstants.adminUsername &&
       password == AppConstants.adminPassword;
 
-  /// Admin login (username + password dialog on the Login screen).
+  static bool isSuperAdminLogin(String username, String password) =>
+      username.trim().toLowerCase() == AppConstants.superAdminUsername &&
+      password == AppConstants.superAdminPassword;
+
+  static bool isAdministratorLogin(String username, String password) =>
+      isAdminLogin(username, password) || isSuperAdminLogin(username, password);
+
+  /// Administrator login (username + password dialog on the Login screen).
   ///
-  /// Wrong credentials throw [AdminLoginException] before Firebase is
-  /// touched. Then signs in the admin account; an account still on the
-  /// earlier password is migrated to the new one, and a missing account is
-  /// provisioned (Auth user + `admin`-role users doc).
+  /// The demo superadmin account is provisioned on first use. This shared,
+  /// source-controlled credential is only suitable for the class demo.
   Future<void> signInAdmin(String username, String password) async {
+    if (isSuperAdminLogin(username, password)) {
+      await _signInSuperAdmin();
+      return;
+    }
     if (!isAdminLogin(username, password)) {
       throw const AdminLoginException('Incorrect admin username or password.');
     }
@@ -104,8 +110,7 @@ class AuthService {
       user = (await _auth.signInWithEmailAndPassword(
         email: email,
         password: AppConstants.adminPassword,
-      ))
-          .user;
+      )).user;
     } on FirebaseAuthException catch (e) {
       if (e.code != 'user-not-found' &&
           e.code != 'invalid-credential' &&
@@ -113,14 +118,14 @@ class AuthService {
         rethrow;
       }
     }
+
     // Existing account on the earlier password: sign in, then migrate.
     if (user == null) {
       try {
         user = (await _auth.signInWithEmailAndPassword(
           email: email,
           password: AppConstants.legacyAdminPassword,
-        ))
-            .user;
+        )).user;
         await user?.updatePassword(AppConstants.adminPassword);
       } on FirebaseAuthException catch (e) {
         if (e.code != 'user-not-found' &&
@@ -136,8 +141,7 @@ class AuthService {
         user = (await _auth.createUserWithEmailAndPassword(
           email: email,
           password: AppConstants.adminPassword,
-        ))
-            .user;
+        )).user;
       } on FirebaseAuthException catch (e) {
         if (e.code == 'email-already-in-use') {
           throw const AdminLoginException(
@@ -164,10 +168,74 @@ class AuthService {
           createdAt: DateTime.now(),
         ),
       );
-    } else if (profile.role != UserRole.admin) {
+    } else if (profile.role != UserRole.admin &&
+        profile.role != UserRole.superadmin) {
       await _firestore.updateUserProfile(user.uid, {
         'role': UserRole.admin.value,
       });
+    }
+  }
+
+  Future<void> _signInSuperAdmin() async {
+    const email = AppConstants.superAdminEmail;
+    User? user;
+    try {
+      user = (await _auth.signInWithEmailAndPassword(
+        email: email,
+        password: AppConstants.superAdminPassword,
+      )).user;
+    } on FirebaseAuthException catch (e) {
+      if (e.code != 'user-not-found' &&
+          e.code != 'invalid-credential' &&
+          e.code != 'wrong-password') {
+        rethrow;
+      }
+    }
+    if (user == null) {
+      try {
+        user = (await _auth.createUserWithEmailAndPassword(
+          email: email,
+          password: AppConstants.superAdminPassword,
+        )).user;
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'email-already-in-use' ||
+            e.code == 'invalid-credential' ||
+            e.code == 'wrong-password') {
+          throw const AdminLoginException(
+            'The demo superadmin account exists with a different password. '
+            'Contact the Firebase project owner.',
+          );
+        }
+        rethrow;
+      }
+      if (user != null) await user.updateDisplayName('SwidShop Superadmin');
+    }
+    if (user == null) {
+      throw const AdminLoginException('Superadmin sign-in failed. Try again.');
+    }
+    try {
+      final profile = await _firestore.getUser(user.uid);
+      if (profile == null) {
+        await _firestore.createUserProfile(
+          UserModel(
+            uid: user.uid,
+            name: 'SwidShop Superadmin',
+            email: email,
+            role: UserRole.superadmin,
+            createdAt: DateTime.now(),
+          ),
+        );
+      } else if (profile.role != UserRole.superadmin) {
+        throw const AdminLoginException(
+          'The configured superadmin account has an invalid role.',
+        );
+      }
+    } on FirebaseException {
+      await _auth.signOut();
+      rethrow;
+    } on AdminLoginException {
+      await _auth.signOut();
+      rethrow;
     }
   }
 

@@ -6,21 +6,25 @@ import '../../core/theme.dart';
 import '../../models/listing_model.dart';
 import '../../models/notification_model.dart';
 import '../../models/user_model.dart';
+import '../../providers/admin_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/app_card_wrapper.dart';
 import '../../widgets/listing_widgets.dart';
 import '../../widgets/top_app_bar.dart';
 import '../admin/admin_users_screen.dart';
+import '../admin/admin_shell.dart';
 import '../seller/monitor_bidding_screen.dart';
 import '../seller/swap_offers_screen.dart';
 import '../shared/transaction_chat_screen.dart';
 import 'activity_screen.dart';
+import 'live_bidding_screen.dart';
 import 'listing_detail_screen.dart';
 import 'profile_screen.dart';
 
 /// relatedId convention written by every notifier:
-/// `<kind>:<id>` with kind = listing | transaction | offer.
+/// `<kind>:<id>` with kind = listing | transaction | offer | trust | user |
+/// report | ratingReport | role.
 ({String kind, String id}) parseRelatedId(String relatedId) {
   final i = relatedId.indexOf(':');
   if (i <= 0) return (kind: '', id: relatedId);
@@ -95,10 +99,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                 if (snap.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
                 }
-                final items =
-                    (snap.data ?? const <NotificationModel>[])
-                        .where(_matches)
-                        .toList();
+                final items = (snap.data ?? const <NotificationModel>[])
+                    .where(_matches)
+                    .toList();
                 if (items.isEmpty) {
                   return const Center(
                     child: Text(
@@ -165,9 +168,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             fontWeight: FontWeight.w600,
           ),
           backgroundColor: AppColors.surface,
-          side: BorderSide(
-            color: selected ? AppColors.coral : AppColors.line,
-          ),
+          side: BorderSide(color: selected ? AppColors.coral : AppColors.line),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(999),
           ),
@@ -189,16 +190,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Widget _section(String label) => Padding(
-        padding: const EdgeInsets.only(bottom: 8, top: 4),
-        child: Text(
-          label,
-          style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            color: AppColors.gray,
-            fontSize: 13,
-          ),
-        ),
-      );
+    padding: const EdgeInsets.only(bottom: 8, top: 4),
+    child: Text(
+      label,
+      style: const TextStyle(
+        fontWeight: FontWeight.w700,
+        color: AppColors.gray,
+        fontSize: 13,
+      ),
+    ),
+  );
 
   Widget _tile(NotificationModel n) {
     return Padding(
@@ -224,19 +225,13 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   Text(
                     n.message,
                     style: TextStyle(
-                      fontWeight:
-                          n.read ? FontWeight.w400 : FontWeight.w700,
+                      fontWeight: n.read ? FontWeight.w400 : FontWeight.w700,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    n.createdAt == null
-                        ? ''
-                        : timeago.format(n.createdAt!),
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.gray,
-                    ),
+                    n.createdAt == null ? '' : timeago.format(n.createdAt!),
+                    style: const TextStyle(fontSize: 12, color: AppColors.gray),
                   ),
                 ],
               ),
@@ -279,11 +274,33 @@ void openNotificationTarget(
   UserRole? role,
 }) {
   final link = parseRelatedId(n.relatedId);
+  if (role?.isStaff == true) {
+    if (link.kind == 'user' || link.kind == 'trust') {
+      openAdminUserDetail(context, link.id);
+      return;
+    }
+    final targetSection = switch (link.kind) {
+      'listing' => AdminSection.listings,
+      'report' => AdminSection.reports,
+      'ratingReport' => AdminSection.ratings,
+      _ => null,
+    };
+    if (targetSection != null) {
+      final admin = context.read<AdminProvider>();
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              AdminShell(initial: targetSection, sharedProvider: admin),
+        ),
+      );
+      return;
+    }
+  }
   Widget? next;
   switch (n.type) {
     case NotificationType.outbid:
       if (link.id.isNotEmpty) {
-        next = ListingDetailScreen(listingId: link.id);
+        next = LiveBiddingScreen(listingId: link.id);
       }
     case NotificationType.bidReceived:
       if (link.id.isNotEmpty) {
@@ -307,10 +324,10 @@ void openNotificationTarget(
       // auction end-time changes open the listing.
       if (link.kind == 'role') next = const ProfileScreen();
       if (link.kind == 'listing' && link.id.isNotEmpty) {
-        next = ListingDetailScreen(listingId: link.id);
+        next = LiveBiddingScreen(listingId: link.id);
       }
       if (link.kind == 'trust' && link.id.isNotEmpty) {
-        if (role == UserRole.admin) {
+        if (role == UserRole.admin || role == UserRole.superadmin) {
           openAdminUserDetail(context, link.id);
           return;
         }

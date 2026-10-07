@@ -91,8 +91,7 @@ class AppUtils {
   }
 
   /// Rounds to 1 decimal place, e.g. 4.666 -> 4.7.
-  static double roundRating(num value) =>
-      (value.toDouble() * 10).round() / 10;
+  static double roundRating(num value) => (value.toDouble() * 10).round() / 10;
 }
 
 /// Reusable form-field validators.
@@ -130,7 +129,11 @@ class Validators {
 
   /// Philippine mobile number without the +63 prefix, e.g. `917 123 4567`.
   static String? phMobile(String? value) {
-    final digits = (value ?? '').replaceAll(RegExp(r'\D'), '');
+    final input = value?.trim() ?? '';
+    if (input.isNotEmpty && !RegExp(r'^[\d\s()-]+$').hasMatch(input)) {
+      return 'Use digits only';
+    }
+    final digits = input.replaceAll(RegExp(r'\D'), '');
     if (digits.isEmpty) return 'Mobile number is required';
     if (digits.length != 10 || !digits.startsWith('9')) {
       return 'Enter a 10-digit number starting with 9';
@@ -161,8 +164,30 @@ class Validators {
   static String? positiveNumber(String? value, [String label = 'Amount']) {
     if (value == null || value.trim().isEmpty) return '$label is required';
     final parsed = num.tryParse(value.trim());
-    if (parsed == null) return '$label must be a number';
+    if (parsed == null || !parsed.isFinite) return '$label must be a number';
     if (parsed <= 0) return '$label must be greater than zero';
+    return null;
+  }
+
+  /// Validates optional minimum / maximum price fields without silently
+  /// treating malformed values as an omitted filter.
+  static String? priceRange(String? minValue, String? maxValue) {
+    final minText = minValue?.trim() ?? '';
+    final maxText = maxValue?.trim() ?? '';
+    final min = minText.isEmpty ? null : double.tryParse(minText);
+    final max = maxText.isEmpty ? null : double.tryParse(maxText);
+    if (minText.isNotEmpty && (min == null || !min.isFinite)) {
+      return 'Minimum price must be a valid number';
+    }
+    if (maxText.isNotEmpty && (max == null || !max.isFinite)) {
+      return 'Maximum price must be a valid number';
+    }
+    if (min != null && min < 0 || max != null && max < 0) {
+      return 'Prices cannot be negative';
+    }
+    if (min != null && max != null && min > max) {
+      return 'Minimum price cannot be greater than maximum price';
+    }
     return null;
   }
 }

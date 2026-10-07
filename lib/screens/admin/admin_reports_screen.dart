@@ -379,9 +379,11 @@ class _ReportCardState extends State<_ReportCard> {
           await fs.updateAccountStatus(_r.targetId, AccountStatus.suspended);
           await fs.updateReportStatus(_r.reportId, ReportStatus.suspended);
         case 'remove':
-          await fs.updateListing(_r.targetId, {
-            'status': ListingStatus.removed.value,
-          });
+          await fs.updateListing(
+            _r.targetId,
+            {'status': ListingStatus.removed.value},
+            auditAdminAction: true,
+          );
           await fs.updateReportStatus(_r.reportId, ReportStatus.removed);
       }
     } catch (e) {

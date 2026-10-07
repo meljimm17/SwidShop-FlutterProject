@@ -12,6 +12,7 @@ String roleBlurb(UserRole role) => switch (role) {
       UserRole.customer => 'Buy, bid and swap. No shop.',
       UserRole.both => 'Run your own shop AND buy, bid and swap.',
       UserRole.admin => '',
+      UserRole.superadmin => '',
     };
 
 /// Profile tile: current role + request status; tap to request a change.
@@ -23,7 +24,9 @@ class RoleRequestTile extends StatelessWidget {
     final auth = context.watch<AuthProvider>();
     final uid = auth.firebaseUser?.uid ?? '';
     final role = auth.profile?.role ?? UserRole.customer;
-    if (uid.isEmpty || role == UserRole.admin) return const SizedBox.shrink();
+    if (uid.isEmpty || role == UserRole.admin || role == UserRole.superadmin) {
+      return const SizedBox.shrink();
+    }
     return StreamBuilder<RoleRequestModel?>(
       stream: FirestoreService().streamMyRoleRequest(uid),
       builder: (context, snap) {

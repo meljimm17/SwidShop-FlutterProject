@@ -58,6 +58,38 @@ void main() {
       expect(t.feeOverdue, isFalse);
     });
 
+    group('fee hold eligibility', () {
+      test('only outstanding non-cancelled fees can justify a hold', () {
+        const base = TransactionModel(
+          transactionId: 't1',
+          listingId: 'l1',
+          buyerId: 'b',
+          sellerId: 's',
+        );
+        expect(
+          FirestoreService.hasOutstandingPlatformFee([
+            base.copyWith(feeStatus: 'unpaid'),
+          ]),
+          isTrue,
+        );
+        expect(
+          FirestoreService.hasOutstandingPlatformFee([
+            base.copyWith(feeStatus: 'paid'),
+          ]),
+          isFalse,
+        );
+        expect(
+          FirestoreService.hasOutstandingPlatformFee([
+            base.copyWith(
+              feeStatus: 'unpaid',
+              status: TransactionStatus.cancelled,
+            ),
+          ]),
+          isFalse,
+        );
+      });
+    });
+
     test('unpaid past due is overdue', () {
       final t = base.copyWith(
         feeStatus: 'unpaid',
@@ -91,6 +123,38 @@ void main() {
   });
 
   group('ListingModel perk flags', () {
+    test(
+      'listing input validation rejects missing photos and invalid prices',
+      () {
+        const validBuyNow = ListingModel(
+          listingId: 'l',
+          sellerId: 's',
+          title: 'Jacket',
+          images: ['https://example.com/photo.jpg'],
+          price: 100,
+        );
+        expect(FirestoreService.listingInputProblem(validBuyNow), isNull);
+        expect(
+          FirestoreService.listingInputProblem(
+            validBuyNow.copyWith(images: const []),
+          ),
+          contains('photo'),
+        );
+        expect(
+          FirestoreService.listingInputProblem(
+            validBuyNow.copyWith(price: -10),
+          ),
+          contains('greater than zero'),
+        );
+        expect(
+          FirestoreService.listingInputProblem(
+            validBuyNow.copyWith(price: double.nan),
+          ),
+          contains('valid price'),
+        );
+      },
+    );
+
     test('featured window check', () {
       const l = ListingModel(listingId: 'l', sellerId: 's', title: 'T');
       expect(l.isFeatured, isFalse);
@@ -377,11 +441,13 @@ void main() {
   });
 
   group('roles: customer + both only, one home, requests', () {
-    test('only Customer and Customer + Seller (plus admin) exist', () {
-      expect(
-        UserRole.values.map((r) => r.value),
-        ['customer', 'both', 'admin'],
-      );
+    test('customer, seller, admin, and superadmin roles exist', () {
+      expect(UserRole.values.map((r) => r.value), [
+        'customer',
+        'both',
+        'admin',
+        'superadmin',
+      ]);
       expect(UserRole.both.label, 'Customer + Seller');
       expect(UserRole.both.canSell, isTrue);
       expect(UserRole.customer.canSell, isFalse);

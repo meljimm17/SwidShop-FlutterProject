@@ -10,7 +10,9 @@ import '../auth/role_home.dart';
 /// True only for signed-in admins. Every admin screen gates on this —
 /// a non-admin can never reach an admin route, even by deep push.
 bool isAdmin(AuthProvider auth) =>
-    auth.isLoggedIn && auth.profile?.role == UserRole.admin;
+    auth.isLoggedIn &&
+    (auth.profile?.role == UserRole.admin ||
+        auth.profile?.role == UserRole.superadmin);
 
 /// Wraps admin screens: non-admins get a dead-end notice, never content.
 class AdminGate extends StatelessWidget {
@@ -49,6 +51,34 @@ class AdminGate extends StatelessWidget {
                 onPressed: () => signOutToLogin(context),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+}
+
+class SuperadminGate extends StatelessWidget {
+  const SuperadminGate({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    if (auth.isLoggedIn && auth.profile?.role == UserRole.superadmin) {
+      return child;
+    }
+    return const Scaffold(
+      backgroundColor: AppColors.cream,
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Text(
+            'This tool requires a superadmin account.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: AppColors.gray),
           ),
         ),
       ),
